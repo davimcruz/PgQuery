@@ -35,3 +35,7 @@ scripts/configure-release-secrets.sh
 ```
 
 O script prepara os secrets de Actions para a chave privada EdDSA do Sparkle e para uma identidade de assinatura autoassinada estável. As chaves privadas ficam no Chaves do macOS e nos secrets do GitHub Actions; não são gravadas no repositório. A chave pública Sparkle já está embutida no app. Sem uma conta Apple Developer, o primeiro download pode exigir que cada pessoa autorize a abertura do app nas configurações do macOS.
+
+## Armazenamento local da conexão
+
+A URL de conexão fica em `~/Library/Application Support/PgQuery/connection.txt`, com permissões restritas à conta do usuário. O arquivo não é criptografado e pode conter a senha do banco; proteja sua conta do macOS e apague esse arquivo para remover a conexão salva.

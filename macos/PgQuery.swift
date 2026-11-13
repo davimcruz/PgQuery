@@ -1,7 +1,6 @@
 import AppKit
 import Foundation
 import Darwin
-import Security
 import Sparkle
 
 @MainActor
@@ -184,33 +183,29 @@ final class PgQueryApp: NSObject, NSApplicationDelegate, NSTextViewDelegate, NST
         Timer.scheduledTimer(timeInterval: 0.5, target: self, selector: #selector(pollTimer(_:)), userInfo: nil, repeats: true)
     }
 
-    private var connectionKeychainQuery: [String: Any] {
-        [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: "com.davi.pgquery",
-            kSecAttrAccount as String: "postgres-connection-url",
-        ]
+    private var connectionFileURL: URL {
+        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("PgQuery", isDirectory: true)
+            .appendingPathComponent("connection.txt", isDirectory: false)
     }
 
     private func loadSavedConnectionURL() -> String? {
-        var query = connectionKeychainQuery
-        query[kSecReturnData as String] = true
-        query[kSecMatchLimit as String] = kSecMatchLimitOne
-        var result: CFTypeRef?
-        guard SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess,
-              let data = result as? Data else { return nil }
-        return String(data: data, encoding: .utf8)
+        guard let data = try? Data(contentsOf: connectionFileURL),
+              let value = String(data: data, encoding: .utf8),
+              !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+        return value
     }
 
-    private func saveConnectionURLToKeychain(_ value: String) {
-        let data = Data(value.utf8)
-        let update = [kSecValueData as String: data]
-        let status = SecItemUpdate(connectionKeychainQuery as CFDictionary, update as CFDictionary)
-        guard status == errSecItemNotFound else { return }
-        var insert = connectionKeychainQuery
-        insert[kSecValueData as String] = data
-        insert[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlockedThisDeviceOnly
-        SecItemAdd(insert as CFDictionary, nil)
+    private func saveConnectionURLToDisk(_ value: String) {
+        let directory = connectionFileURL.deletingLastPathComponent()
+        do {
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+            try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: directory.path)
+            try Data(value.utf8).write(to: connectionFileURL, options: .atomic)
+            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: connectionFileURL.path)
+        } catch {
+            NSLog("PgQuery: não foi possível salvar a conexão local: %@", error.localizedDescription)
+        }
     }
 
     private func buildWindow() {
@@ -1209,7 +1204,7 @@ final class PgQueryApp: NSObject, NSApplicationDelegate, NSTextViewDelegate, NST
             tlsWarningField.isHidden = !hasUnverifiedTLS
             if text.hasPrefix("Conectado") {
                 setConnected(true)
-                saveConnectionURLToKeychain(connectionURL)
+                saveConnectionURLToDisk(connectionURL)
             }
         case "tables":
             tables = event["items"] as? [String] ?? []

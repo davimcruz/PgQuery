@@ -18,7 +18,7 @@ swiftc -parse-as-library \
   -import-objc-header macos/PgQueryCore.h \
   macos/PgQuery.swift target/release/libpgquery_core.a \
   -o "$APP/Contents/MacOS/PgQuery" \
-  -framework AppKit -framework Security -framework SystemConfiguration \
+  -framework AppKit -framework SystemConfiguration \
   -F "$(dirname "$sparkle_framework")" -framework Sparkle \
   -Xlinker -rpath -Xlinker '@executable_path/../Frameworks'
 ditto "$sparkle_framework" "$APP/Contents/Frameworks/Sparkle.framework"
