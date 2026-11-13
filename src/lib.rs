@@ -7,6 +7,7 @@ use rustls::{
 use std::{
     ffi::{CStr, CString},
     os::raw::c_char,
+    collections::HashSet,
     sync::{mpsc::{self, Receiver, Sender}, Arc, Mutex, OnceLock},
     thread,
 };
@@ -66,7 +67,7 @@ impl ServerCertVerifier for EncryptionOnlyVerifier {
 }
 
 enum Request { Connect(String), Query { sql: String, preview: bool } }
-enum Event { Status(String), Tables(Vec<String>), Results { preview: bool, headers: Vec<String>, rows: Vec<Vec<String>>, note: String }, Error(String), QueryError(String) }
+enum Event { Status(String), Tables(Vec<String>), Columns(Vec<String>), Results { preview: bool, headers: Vec<String>, rows: Vec<Vec<String>>, note: String }, Error(String), QueryError(String) }
 
 fn json_quote(value: &str) -> String {
     let mut output = String::with_capacity(value.len() + 2);
@@ -98,6 +99,24 @@ fn error_chain(error: &dyn std::error::Error) -> String {
         current = item.source();
     }
     parts.join(": ")
+}
+
+fn postgres_error(error: &tokio_postgres::Error) -> String {
+    if let Some(db) = error.as_db_error() {
+        let mut message = format!("{} (SQLSTATE {})", db.message(), db.code().code());
+        if let Some(detail) = db.detail() { message.push_str(&format!("\nDETALHE: {detail}")); }
+        if let Some(hint) = db.hint() { message.push_str(&format!("\nDICA: {hint}")); }
+        if let Some(position) = db.position() {
+            match position {
+                tokio_postgres::error::ErrorPosition::Original(position) => message.push_str(&format!("\nPosição na consulta: {position}")),
+                tokio_postgres::error::ErrorPosition::Internal { position, .. } => message.push_str(&format!("\nPosição na consulta interna: {position}")),
+            }
+        }
+        if let Some(context) = db.where_() { message.push_str(&format!("\nCONTEXTO: {context}")); }
+        message
+    } else {
+        error_chain(error)
+    }
 }
 
 struct Backend { tx: Sender<Request>, rx: Mutex<Receiver<Event>> }
@@ -156,6 +175,10 @@ fn worker(requests: Receiver<Request>, events: Sender<Event>) {
                             Ok((_, rows, _)) => {
                                 let tables = rows.into_iter().filter_map(|mut row| row.pop()).collect();
                                 let _ = events.send(Event::Tables(tables));
+                                match query_column_names(&runtime, client.as_ref().unwrap()) {
+                                    Ok(columns) => { let _ = events.send(Event::Columns(columns)); }
+                                    Err(error) => { let _ = events.send(Event::QueryError(error)); }
+                                }
                                 let connected_status = if encryption_only {
                                     "Conectado · TLS ativo; certificado do servidor não verificado"
                                 } else {
@@ -168,7 +191,9 @@ fn worker(requests: Receiver<Request>, events: Sender<Event>) {
                     }
                     Err(error) => {
                         client = None;
-                        let details = error_chain(error.as_ref());
+                        let details = error.downcast_ref::<tokio_postgres::Error>()
+                            .map(postgres_error)
+                            .unwrap_or_else(|| error_chain(error.as_ref()));
                         let lower_details = details.to_lowercase();
                         let network_hint = if connection_string.contains(".supabase.co")
                             && ["network is unreachable", "no route to host", "connection timed out", "failed to lookup address"]
@@ -192,7 +217,7 @@ fn worker(requests: Receiver<Request>, events: Sender<Event>) {
 
 fn query_rows(runtime: &tokio::runtime::Runtime, client: &tokio_postgres::Client, sql: &str) -> Result<(Vec<String>, Vec<Vec<String>>, String), String> {
     runtime.block_on(async {
-        let stream = client.simple_query_raw(sql).await.map_err(|e| e.to_string())?;
+        let stream = client.simple_query_raw(sql).await.map_err(|e| postgres_error(&e))?;
         pin_mut!(stream);
         let mut headers = Vec::new();
         let mut rows = Vec::new();
@@ -200,7 +225,7 @@ fn query_rows(runtime: &tokio::runtime::Runtime, client: &tokio_postgres::Client
         let mut total = 0usize;
         let mut command = String::new();
         while let Some(message) = stream.next().await {
-            match message.map_err(|e| e.to_string())? {
+            match message.map_err(|e| postgres_error(&e))? {
                 SimpleQueryMessage::Row(row) => {
                     if headers.is_empty() { headers = row.columns().iter().map(|column| column.name().to_owned()).collect(); }
                     total += 1;
@@ -218,6 +243,25 @@ fn query_rows(runtime: &tokio::runtime::Runtime, client: &tokio_postgres::Client
         let note = if total > rows.len() { format!("Mostrando {} de {total} linhas (limite de memória atingido).", rows.len()) }
             else if !command.is_empty() { command } else { format!("{} linha(s)", rows.len()) };
         Ok((headers, rows, note))
+    })
+}
+
+fn query_column_names(runtime: &tokio::runtime::Runtime, client: &tokio_postgres::Client) -> Result<Vec<String>, String> {
+    const SQL: &str = "SELECT column_name FROM information_schema.columns WHERE table_schema NOT IN ('pg_catalog', 'information_schema') ORDER BY column_name";
+    runtime.block_on(async {
+        let stream = client.simple_query_raw(SQL).await.map_err(|e| postgres_error(&e))?;
+        pin_mut!(stream);
+        let mut columns = Vec::new();
+        let mut seen = HashSet::new();
+        while let Some(message) = stream.next().await {
+            if let SimpleQueryMessage::Row(row) = message.map_err(|e| postgres_error(&e))? {
+                if let Some(name) = row.get(0) {
+                    let name = name.to_owned();
+                    if seen.insert(name.clone()) { columns.push(name); }
+                }
+            }
+        }
+        Ok(columns)
     })
 }
 
@@ -253,6 +297,7 @@ pub extern "C" fn pg_poll() -> *mut c_char {
     let message = match event {
         Event::Status(text) => format!("{{\"kind\":\"status\",\"text\":{}}}", json_quote(&text)),
         Event::Tables(items) => format!("{{\"kind\":\"tables\",\"items\":{}}}", json_strings(&items)),
+        Event::Columns(items) => format!("{{\"kind\":\"columns\",\"items\":{}}}", json_strings(&items)),
         Event::Error(text) => format!("{{\"kind\":\"error\",\"text\":{}}}", json_quote(&text)),
         Event::QueryError(text) => format!("{{\"kind\":\"query_error\",\"text\":{}}}", json_quote(&text)),
         Event::Results { preview, headers, rows, note } => {

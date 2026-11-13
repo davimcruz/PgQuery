@@ -132,6 +132,7 @@ final class PgQueryApp: NSObject, NSApplicationDelegate, NSTextViewDelegate, NST
     private let connectionBar = NSStackView()
     private let connectedBar = NSStackView()
     private var tables: [String] = []
+    private var autocompleteColumns: [String] = []
     private var resultHeaders: [String] = []
     private var resultRows: [[String]] = []
     private var resultSortColumn: Int?
@@ -905,9 +906,22 @@ final class PgQueryApp: NSObject, NSApplicationDelegate, NSTextViewDelegate, NST
         guard (notification.object as? NSTextView) === queryView else { return }
         UserDefaults.standard.set(queryView.string, forKey: "pgquery.last-sql")
         highlightSQL()
+        // Keep suggestions lightweight: only open the native completion list
+        // after the user has typed a meaningful identifier prefix.
+        let range = queryView.selectedRange()
+        if range.length == 0,
+           let prefix = currentSQLPrefix(in: queryView.string as NSString, caret: range.location),
+           prefix.count >= 2,
+           completionCandidates(matching: prefix).count > 0 {
+            DispatchQueue.main.async { [weak self] in self?.queryView.complete(nil) }
+        }
     }
 
     func textView(_ textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
+        if textView === queryView, commandSelector == #selector(NSTextView.complete(_:)) {
+            textView.complete(nil)
+            return true
+        }
         guard textView === queryView, commandSelector == #selector(NSResponder.insertNewline(_:)) else { return false }
         let source = textView.string as NSString
         let cursor = min(textView.selectedRange().location, source.length)
@@ -917,6 +931,51 @@ final class PgQueryApp: NSObject, NSApplicationDelegate, NSTextViewDelegate, NST
         let indentation = String(prefix.prefix { $0 == " " || $0 == "\t" })
         textView.insertText("\n" + indentation, replacementRange: textView.selectedRange())
         return true
+    }
+
+    func textView(_ textView: NSTextView, completions words: [String], forPartialWordRange charRange: NSRange, indexOfSelectedItem index: UnsafeMutablePointer<Int>?) -> [String] {
+        guard textView === queryView else { return [] }
+        let source = textView.string as NSString
+        let prefix = source.substring(with: charRange)
+        let beginsInsideQuotes = charRange.location > 0 && source.substring(with: NSRange(location: charRange.location - 1, length: 1)) == "\""
+        let end = charRange.location + charRange.length
+        let hasClosingQuote = beginsInsideQuotes && end < source.length && source.substring(with: NSRange(location: end, length: 1)) == "\""
+        return completionCandidates(matching: prefix, insideQuotedIdentifier: beginsInsideQuotes, hasClosingQuote: hasClosingQuote)
+    }
+
+    private func currentSQLPrefix(in source: NSString, caret: Int) -> String? {
+        guard caret >= 0, caret <= source.length else { return nil }
+        var start = caret
+        while start > 0 {
+            let character = source.substring(with: NSRange(location: start - 1, length: 1))
+            guard character.rangeOfCharacter(from: CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "_$\"."))) != nil else { break }
+            start -= 1
+        }
+        guard start < caret else { return nil }
+        return source.substring(with: NSRange(location: start, length: caret - start)).trimmingCharacters(in: CharacterSet(charactersIn: "\"."))
+    }
+
+    private func completionCandidates(matching prefix: String, insideQuotedIdentifier: Bool = false, hasClosingQuote: Bool = false) -> [String] {
+        let normalizedPrefix = prefix.trimmingCharacters(in: CharacterSet(charactersIn: "\"."))
+        guard !normalizedPrefix.isEmpty else { return [] }
+        var candidates: [(name: String, insertion: String)] = []
+        for table in tables {
+            let pieces = table.split(separator: ".", maxSplits: 1).map(String.init)
+            guard let name = pieces.last else { continue }
+            let insertion = pieces.count == 2 && pieces[0] != "public" ? "\(sqlIdentifier(pieces[0])).\(sqlIdentifier(name))" : sqlIdentifier(name)
+            candidates.append((name, insertion))
+        }
+        candidates.append(contentsOf: autocompleteColumns.map { ($0, sqlIdentifier($0)) })
+        let matching = candidates.filter { $0.name.localizedLowercase.hasPrefix(normalizedPrefix.localizedLowercase) }
+        let unique = Dictionary(matching.map { ($0.insertion, $0) }, uniquingKeysWith: { first, _ in first })
+        return unique.values.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }.prefix(80).map {
+            if insideQuotedIdentifier { return $0.name + (hasClosingQuote ? "" : "\"") }
+            return $0.insertion
+        }
+    }
+
+    private func sqlIdentifier(_ identifier: String) -> String {
+        "\"\(identifier.replacingOccurrences(of: "\"", with: "\"\""))\""
     }
 
     private func highlightSQL() {
@@ -1155,6 +1214,8 @@ final class PgQueryApp: NSObject, NSApplicationDelegate, NSTextViewDelegate, NST
         case "tables":
             tables = event["items"] as? [String] ?? []
             tableListView.reloadData()
+        case "columns":
+            autocompleteColumns = event["items"] as? [String] ?? []
         case "results", "table_preview":
             closeRowDetails()
             hasExecutedQuery = kind == "results"
@@ -1180,7 +1241,14 @@ final class PgQueryApp: NSObject, NSApplicationDelegate, NSTextViewDelegate, NST
             resultRows = []
             configureResultColumns()
             resultsTableView.reloadData()
-            resultNote.stringValue = event["text"] as? String ?? "Falha na consulta"
+            let message = event["text"] as? String ?? "Falha na consulta"
+            resultNote.stringValue = message.components(separatedBy: .newlines).first ?? message
+            resultNote.toolTip = message
+            let alert = NSAlert()
+            alert.messageText = "Erro ao executar SQL"
+            alert.informativeText = message
+            alert.alertStyle = .warning
+            alert.beginSheetModal(for: window)
         default: break
         }
     }
