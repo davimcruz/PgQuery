@@ -3,13 +3,13 @@
     <channel>
         <title>PgQuery</title>
         <item>
-            <title>0.1.6</title>
-            <pubDate>Fri, 13 Nov 2026 22:02:39 +0000</pubDate>
-            <sparkle:version>6</sparkle:version>
-            <sparkle:shortVersionString>0.1.6</sparkle:shortVersionString>
+            <title>0.1.7</title>
+            <pubDate>Fri, 13 Nov 2026 22:24:03 +0000</pubDate>
+            <sparkle:version>7</sparkle:version>
+            <sparkle:shortVersionString>0.1.7</sparkle:shortVersionString>
             <sparkle:minimumSystemVersion>12.0</sparkle:minimumSystemVersion>
             <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
-            <enclosure url="https://github.com/davimcruz/PgQuery/releases/download/v0.1.6/PgQuery-0.1.6.zip" length="2785612" type="application/octet-stream" sparkle:edSignature="SYyLACCirB70QB8fTmfkHYcTJgc4F3BL66ha/lY2UsqgkIS223u6ERIC20vnxpmSaD33TlhCsoAfXQBgEH1NBg=="/>
+            <enclosure url="https://github.com/davimcruz/PgQuery/releases/download/v0.1.7/PgQuery-0.1.7.zip" length="2786024" type="application/octet-stream" sparkle:edSignature="2c0HqT+J2vhso+YB98DItOT/w+NnlXu9vaYkwuikV2zohuUhS7+GEI74rWSrLvqNaT5INliEVXo51sOr3JN2Cw=="/>
         </item>
     </channel>
 </rss>
