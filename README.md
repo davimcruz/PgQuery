@@ -2,6 +2,8 @@
 
 Cliente desktop leve para PostgreSQL no macOS. A interface usa AppKit nativo; conexão, execução de SQL e leitura de resultados ficam no núcleo Rust.
 
+[Baixar PgQuery para macOS (.dmg)](https://github.com/davimcruz/PgQuery/releases/latest/download/PgQuery.dmg)
+
 ## Usar
 
 1. Abra `PgQuery.app`.

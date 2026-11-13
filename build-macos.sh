@@ -31,7 +31,7 @@ if [ -n "${SPARKLE_PUBLIC_ED_KEY:-}" ]; then
   /usr/libexec/PlistBuddy -c "Set :SUPublicEDKey ${SPARKLE_PUBLIC_ED_KEY}" "$APP/Contents/Info.plist"
 fi
 if [ -n "${CODESIGN_IDENTITY:-}" ]; then
-  codesign --force --deep --options runtime --sign "$CODESIGN_IDENTITY" "$APP"
+  codesign --force --deep --sign "$CODESIGN_IDENTITY" "$APP"
 else
   codesign --force --deep --sign - "$APP"
 fi

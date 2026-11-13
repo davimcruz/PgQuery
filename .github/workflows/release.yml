@@ -52,7 +52,12 @@ jobs:
         run: |
           APP="target/PgQuery.app"
           ditto -c -k --sequesterRsrc --keepParent "$APP" "PgQuery-${VERSION}.zip"
-          hdiutil create -volname "PgQuery ${VERSION}" -srcfolder "$APP" -ov -format UDZO "PgQuery-${VERSION}.dmg"
+          DMG_ROOT="$RUNNER_TEMP/PgQuery-${VERSION}"
+          mkdir -p "$DMG_ROOT"
+          ditto "$APP" "$DMG_ROOT/PgQuery.app"
+          ln -s /Applications "$DMG_ROOT/Applications"
+          hdiutil create -volname "PgQuery ${VERSION}" -srcfolder "$DMG_ROOT" -ov -format UDZO "PgQuery-${VERSION}.dmg"
+          cp "PgQuery-${VERSION}.dmg" PgQuery.dmg
           codesign --verify --deep --strict "$APP"
       - name: Publish GitHub release
         env:
@@ -61,7 +66,12 @@ jobs:
           SPARKLE_PRIVATE_ED_KEY: ${{ secrets.SPARKLE_PRIVATE_ED_KEY }}
         run: |
           TAG="v${VERSION}"
-          gh release create "$TAG" "PgQuery-${VERSION}.zip" "PgQuery-${VERSION}.dmg" --title "PgQuery ${VERSION}" --generate-notes
+          printf '%s\n\n%s\n\n%s\n' \
+            '## Download' \
+            "Download **PgQuery-${VERSION}.dmg** below, open it, and drag PgQuery.app to the Applications shortcut in the disk image." \
+            'The first launch may require Control-click → Open because the app is signed without an Apple Developer ID and is not notarized.' \
+            > "$RUNNER_TEMP/release-notes.md"
+          gh release create "$TAG" "PgQuery-${VERSION}.zip" "PgQuery-${VERSION}.dmg" PgQuery.dmg --title "PgQuery ${VERSION}" --notes-file "$RUNNER_TEMP/release-notes.md"
           mkdir -p updates
           cp "PgQuery-${VERSION}.zip" updates/
           SPARKLE_BIN="$(find .build/artifacts -type f -name generate_appcast -print -quit)"
