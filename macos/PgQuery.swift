@@ -66,17 +66,8 @@ class PointerButton: NSButton {
     override func mouseExited(with event: NSEvent) { NSCursor.arrow.set() }
 }
 
-@MainActor
-final class ActionButton: PointerButton {
-    var onActivate: (() -> Void)?
-    override func mouseDown(with event: NSEvent) {
-        super.mouseDown(with: event)
-        onActivate?()
-    }
-    override func performClick(_ sender: Any?) {
-        super.performClick(sender)
-        onActivate?()
-    }
+private final class DetailDocumentView: NSView {
+    override var isFlipped: Bool { true }
 }
 
 @MainActor
@@ -230,6 +221,7 @@ final class PgQueryApp: NSObject, NSApplicationDelegate, NSTextViewDelegate, NST
             defer: false
         )
         window.title = "PgQuery"
+        window.contentMinSize = NSSize(width: 920, height: 560)
         window.acceptsMouseMovedEvents = true
         window.center()
         window.contentView = content
@@ -240,8 +232,7 @@ final class PgQueryApp: NSObject, NSApplicationDelegate, NSTextViewDelegate, NST
         let connectButton = PointerButton(title: "Conectar", target: self, action: #selector(connect))
         connectButton.bezelStyle = .rounded
         connectButton.keyEquivalent = "\r"
-        let parameterConnectButton = ActionButton(title: "Por parâmetros…", target: nil, action: nil)
-        parameterConnectButton.onActivate = { [weak self] in self?.openSettingsWindow() }
+        let parameterConnectButton = PointerButton(title: "Por parâmetros…", target: self, action: #selector(openSettingsFromMenu(_:)))
         parameterConnectButton.bezelStyle = .rounded
         connectionBar.addArrangedSubview(connectionField)
         connectionBar.addArrangedSubview(connectButton)
@@ -254,8 +245,7 @@ final class PgQueryApp: NSObject, NSApplicationDelegate, NSTextViewDelegate, NST
 
         connectionSummaryField.font = .systemFont(ofSize: 13, weight: .medium)
         connectionSummaryField.textColor = .systemGreen
-        let settingsButton = ActionButton(title: "Configurações", target: nil, action: nil)
-        settingsButton.onActivate = { [weak self] in self?.openSettingsWindow() }
+        let settingsButton = PointerButton(title: "Configurações", target: self, action: #selector(openSettingsFromMenu(_:)))
         settingsButton.bezelStyle = .rounded
         settingsButton.image = NSImage(systemSymbolName: "slider.horizontal.3", accessibilityDescription: "Configurações")
         settingsButton.imagePosition = .imageLeading
@@ -350,14 +340,19 @@ final class PgQueryApp: NSObject, NSApplicationDelegate, NSTextViewDelegate, NST
         resultFilters.addArrangedSubview(resultFilterField)
         detailStack.orientation = .vertical
         detailStack.alignment = .leading
-        detailStack.spacing = 12
+        detailStack.spacing = 6
         detailStack.translatesAutoresizingMaskIntoConstraints = false
         let detailScroll = NSScrollView()
         detailScrollView = detailScroll
         detailScroll.hasVerticalScroller = true
         detailScroll.borderType = .bezelBorder
         applyRoundedBorder(to: detailScroll)
-        detailScroll.documentView = detailStack
+        detailScroll.drawsBackground = false
+        detailScroll.layer?.borderWidth = 0
+        let detailDocument = DetailDocumentView()
+        detailDocument.translatesAutoresizingMaskIntoConstraints = false
+        detailScroll.documentView = detailDocument
+        detailDocument.addSubview(detailStack)
         detailScroll.translatesAutoresizingMaskIntoConstraints = false
         detailPanel = NSVisualEffectView()
         detailPanel.material = .sidebar
@@ -485,9 +480,11 @@ final class PgQueryApp: NSObject, NSApplicationDelegate, NSTextViewDelegate, NST
             sqlHeading.widthAnchor.constraint(equalTo: main.widthAnchor),
             sqlScroll.widthAnchor.constraint(equalTo: main.widthAnchor),
             resultsArea.widthAnchor.constraint(equalTo: main.widthAnchor),
-            detailStack.leadingAnchor.constraint(equalTo: detailScroll.contentView.leadingAnchor, constant: 16),
-            detailStack.trailingAnchor.constraint(equalTo: detailScroll.contentView.trailingAnchor, constant: -16),
-            detailStack.topAnchor.constraint(equalTo: detailScroll.contentView.topAnchor, constant: 16),
+            detailDocument.widthAnchor.constraint(equalTo: detailScroll.contentView.widthAnchor),
+            detailStack.leadingAnchor.constraint(equalTo: detailDocument.leadingAnchor, constant: 4),
+            detailStack.trailingAnchor.constraint(equalTo: detailDocument.trailingAnchor, constant: -4),
+            detailStack.topAnchor.constraint(equalTo: detailDocument.topAnchor, constant: 4),
+            detailStack.bottomAnchor.constraint(equalTo: detailDocument.bottomAnchor, constant: -12),
             drawerHeader.leadingAnchor.constraint(equalTo: detailPanel.leadingAnchor, constant: 20),
             drawerHeader.trailingAnchor.constraint(equalTo: detailPanel.trailingAnchor, constant: -20),
             drawerHeader.topAnchor.constraint(equalTo: detailPanel.topAnchor, constant: 18),
@@ -507,9 +504,9 @@ final class PgQueryApp: NSObject, NSApplicationDelegate, NSTextViewDelegate, NST
         sqlResultsEqualHeightConstraint = sqlScroll.heightAnchor.constraint(equalTo: resultScroll.heightAnchor)
         sqlMinimumHeightConstraint.isActive = true
         sqlResultsEqualHeightConstraint.isActive = true
-        detailPanelWidthConstraint = detailPanel.widthAnchor.constraint(equalToConstant: 420)
+        detailPanelWidthConstraint = detailPanel.widthAnchor.constraint(equalToConstant: 340)
         rootFullWidthConstraint = root.widthAnchor.constraint(equalTo: appShell.widthAnchor)
-        rootDrawerWidthConstraint = root.widthAnchor.constraint(equalTo: appShell.widthAnchor, constant: -402)
+        rootDrawerWidthConstraint = root.widthAnchor.constraint(equalTo: appShell.widthAnchor, constant: -352)
         rootFullWidthConstraint.isActive = true
 
         window.makeKeyAndOrderFront(nil)
@@ -535,8 +532,8 @@ final class PgQueryApp: NSObject, NSApplicationDelegate, NSTextViewDelegate, NST
 
     private func applyRoundedBorder(to scrollView: NSScrollView) {
         scrollView.borderType = .noBorder
-        scrollView.scrollerStyle = .overlay
-        scrollView.autohidesScrollers = true
+        scrollView.hasVerticalScroller = false
+        scrollView.hasHorizontalScroller = false
         applyRoundedCorners(scrollView)
         scrollView.layer?.borderWidth = 1
         scrollView.layer?.borderColor = NSColor.separatorColor.cgColor
@@ -616,9 +613,10 @@ final class PgQueryApp: NSObject, NSApplicationDelegate, NSTextViewDelegate, NST
     }
 
     private func openSettingsWindow() {
+        guard window.attachedSheet == nil else { return }
         if settingsWindow == nil {
             settingsWindow = buildSettingsWindow()
-            settingsWindow?.center()
+            settingsWindow?.isReleasedWhenClosed = false
         }
         secureURLField.stringValue = connectionURL
         visibleURLField.stringValue = connectionURL
@@ -628,16 +626,16 @@ final class PgQueryApp: NSObject, NSApplicationDelegate, NSTextViewDelegate, NST
         revealURLButton.state = .off
         toggleURLVisibility(nil)
         NSApp.activate(ignoringOtherApps: true)
-        settingsWindow?.isReleasedWhenClosed = false
-        settingsWindow?.level = .floating
-        settingsWindow?.makeKeyAndOrderFront(nil)
-        settingsWindow?.orderFrontRegardless()
+        if let settingsWindow {
+            window.beginSheet(settingsWindow)
+            settingsWindow.makeFirstResponder(secureURLField)
+        }
     }
 
     private func buildSettingsWindow() -> NSWindow {
         let settings = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 560, height: 400),
-            styleMask: [.titled, .closable],
+            styleMask: [.titled],
             backing: .buffered,
             defer: false
         )
@@ -676,8 +674,8 @@ final class PgQueryApp: NSObject, NSApplicationDelegate, NSTextViewDelegate, NST
             row.alignment = .centerY
             row.spacing = 10
             row.translatesAutoresizingMaskIntoConstraints = false
-            row.widthAnchor.constraint(equalTo: connectionParameterStack.widthAnchor).isActive = true
             connectionParameterStack.addArrangedSubview(row)
+            row.widthAnchor.constraint(equalTo: connectionParameterStack.widthAnchor).isActive = true
         }
         let sslLabel = NSTextField(labelWithString: "SSL")
         sslLabel.widthAnchor.constraint(equalToConstant: 82).isActive = true
@@ -694,6 +692,7 @@ final class PgQueryApp: NSObject, NSApplicationDelegate, NSTextViewDelegate, NST
 
         let cancelButton = PointerButton(title: "Cancelar", target: self, action: #selector(closeSettings(_:)))
         cancelButton.bezelStyle = .rounded
+        cancelButton.keyEquivalent = "\u{1b}"
         let saveButton = PointerButton(title: "Salvar e reconectar", target: self, action: #selector(saveConnectionSettings(_:)))
         saveButton.bezelStyle = .rounded
         saveButton.keyEquivalent = "\r"
@@ -780,7 +779,7 @@ final class PgQueryApp: NSObject, NSApplicationDelegate, NSTextViewDelegate, NST
     }
 
     @objc private func closeSettings(_ sender: Any?) {
-        settingsWindow?.orderOut(nil)
+        if let settingsWindow { window.endSheet(settingsWindow) }
     }
 
     @objc private func saveConnectionSettings(_ sender: Any?) {
@@ -797,7 +796,7 @@ final class PgQueryApp: NSObject, NSApplicationDelegate, NSTextViewDelegate, NST
         guard !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
         connectionURL = value
         connectionField.stringValue = value
-        settingsWindow?.orderOut(nil)
+        if let settingsWindow { window.endSheet(settingsWindow) }
         connect()
     }
 
@@ -811,11 +810,12 @@ final class PgQueryApp: NSObject, NSApplicationDelegate, NSTextViewDelegate, NST
     private func setConnected(_ connected: Bool) {
         if connected {
             hasConnectedOnce = true
-            connectionSummaryField.stringValue = "Conectado"
+            connectionSummaryField.isHidden = true
             connectionSummaryField.textColor = .systemGreen
             connectionBar.isHidden = true
             connectedBar.isHidden = false
         } else if hasConnectedOnce {
+            connectionSummaryField.isHidden = false
             connectionSummaryField.stringValue = "Desconectado · URL oculta"
             connectionSummaryField.textColor = .secondaryLabelColor
             connectionBar.isHidden = true
@@ -832,11 +832,13 @@ final class PgQueryApp: NSObject, NSApplicationDelegate, NSTextViewDelegate, NST
         let visible = filteredTables
         let index = tableListView.selectedRow
         guard index >= 0, index < visible.count else { return }
+        clearResults()
         visible[index].withCString { pg_select_table($0) }
     }
 
     @objc private func runQuery() {
         guard !queryView.string.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        clearResults()
         resultNote.stringValue = "Executando…"
         queryView.string.withCString { pg_query($0) }
     }
@@ -1093,18 +1095,24 @@ final class PgQueryApp: NSObject, NSApplicationDelegate, NSTextViewDelegate, NST
             value.maximumNumberOfLines = 0
             value.lineBreakMode = .byWordWrapping
             value.isSelectable = true
-            value.preferredMaxLayoutWidth = 320
+            value.preferredMaxLayoutWidth = 300
             detailStack.addArrangedSubview(name)
             detailStack.addArrangedSubview(value)
             let separator = NSBox()
             separator.boxType = .separator
             separator.translatesAutoresizingMaskIntoConstraints = false
             detailStack.addArrangedSubview(separator)
+            value.widthAnchor.constraint(equalTo: detailStack.widthAnchor).isActive = true
+            separator.widthAnchor.constraint(equalTo: detailStack.widthAnchor).isActive = true
+            detailStack.setCustomSpacing(12, after: separator)
         }
         detailPanel.isHidden = false
         rootFullWidthConstraint.isActive = false
         detailPanelWidthConstraint.isActive = true
         rootDrawerWidthConstraint.isActive = true
+        detailPanel.layoutSubtreeIfNeeded()
+        detailScrollView.contentView.scroll(to: .zero)
+        detailScrollView.reflectScrolledClipView(detailScrollView.contentView)
     }
 
     @objc private func closeRowDetails(_ sender: Any? = nil) {
@@ -1147,8 +1155,9 @@ final class PgQueryApp: NSObject, NSApplicationDelegate, NSTextViewDelegate, NST
         case "tables":
             tables = event["items"] as? [String] ?? []
             tableListView.reloadData()
-        case "results":
-            hasExecutedQuery = true
+        case "results", "table_preview":
+            closeRowDetails()
+            hasExecutedQuery = kind == "results"
             updateResultActionVisibility()
             resultHeaders = event["headers"] as? [String] ?? []
             resultRows = event["rows"] as? [[String]] ?? []

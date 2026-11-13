@@ -65,8 +65,8 @@ impl ServerCertVerifier for EncryptionOnlyVerifier {
     }
 }
 
-enum Request { Connect(String), Query(String) }
-enum Event { Status(String), Tables(Vec<String>), Results { headers: Vec<String>, rows: Vec<Vec<String>>, note: String }, Error(String), QueryError(String) }
+enum Request { Connect(String), Query { sql: String, preview: bool } }
+enum Event { Status(String), Tables(Vec<String>), Results { preview: bool, headers: Vec<String>, rows: Vec<Vec<String>>, note: String }, Error(String), QueryError(String) }
 
 fn json_quote(value: &str) -> String {
     let mut output = String::with_capacity(value.len() + 2);
@@ -179,10 +179,10 @@ fn worker(requests: Receiver<Request>, events: Sender<Event>) {
                     }
                 }
             }
-            Request::Query(sql) => {
+            Request::Query { sql, preview } => {
                 let Some(client) = client.as_ref() else { let _ = events.send(Event::Error("Conecte-se a um banco primeiro.".into())); continue; };
                 match query_rows(&runtime, client, &sql) {
-                    Ok((headers, rows, note)) => { let _ = events.send(Event::Results { headers, rows, note }); }
+                    Ok((headers, rows, note)) => { let _ = events.send(Event::Results { preview, headers, rows, note }); }
                     Err(error) => { let _ = events.send(Event::QueryError(error)); }
                 }
             }
@@ -234,7 +234,7 @@ pub extern "C" fn pg_connect(value: *const c_char) {
 #[no_mangle]
 pub extern "C" fn pg_query(value: *const c_char) {
     let Some(value) = (unsafe { read_string(value) }) else { return; };
-    let _ = backend().tx.send(Request::Query(value));
+    let _ = backend().tx.send(Request::Query { sql: value, preview: false });
 }
 
 #[no_mangle]
@@ -243,7 +243,7 @@ pub extern "C" fn pg_select_table(value: *const c_char) {
     let (schema, name) = table.split_once('.').unwrap_or(("public", &table));
     let quote = |part: &str| format!("\"{}\"", part.replace('"', "\"\""));
     let sql = format!("SELECT * FROM {}.{} LIMIT {MAX_ROWS}", quote(schema), quote(name));
-    let _ = backend().tx.send(Request::Query(sql));
+    let _ = backend().tx.send(Request::Query { sql, preview: true });
 }
 
 #[no_mangle]
@@ -255,9 +255,10 @@ pub extern "C" fn pg_poll() -> *mut c_char {
         Event::Tables(items) => format!("{{\"kind\":\"tables\",\"items\":{}}}", json_strings(&items)),
         Event::Error(text) => format!("{{\"kind\":\"error\",\"text\":{}}}", json_quote(&text)),
         Event::QueryError(text) => format!("{{\"kind\":\"query_error\",\"text\":{}}}", json_quote(&text)),
-        Event::Results { headers, rows, note } => {
+        Event::Results { preview, headers, rows, note } => {
             let json_rows = rows.iter().map(|row| json_strings(row)).collect::<Vec<_>>().join(",");
-            format!("{{\"kind\":\"results\",\"headers\":{},\"rows\":[{}],\"note\":{}}}", json_strings(&headers), json_rows, json_quote(&note))
+            let kind = if preview { "table_preview" } else { "results" };
+            format!("{{\"kind\":\"{kind}\",\"headers\":{},\"rows\":[{}],\"note\":{}}}", json_strings(&headers), json_rows, json_quote(&note))
         }
     };
     CString::new(message).map(CString::into_raw).unwrap_or(std::ptr::null_mut())
