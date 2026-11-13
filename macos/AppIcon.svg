@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0.8" y2="1">
+      <stop offset="0" stop-color="#303030"/>
+      <stop offset="1" stop-color="#101010"/>
+    </linearGradient>
+    <linearGradient id="edge" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#FFFFFF" stop-opacity="0.22"/>
+      <stop offset="1" stop-color="#FFFFFF" stop-opacity="0.05"/>
+    </linearGradient>
+  </defs>
+  <rect x="24" y="24" width="976" height="976" rx="236" fill="url(#bg)"/>
+  <rect x="25" y="25" width="974" height="974" rx="235" fill="none" stroke="url(#edge)" stroke-width="3"/>
+  <!-- The reference mark, redrawn as clean white vector contours. -->
+  <g transform="translate(30.72 30.72) scale(0.94)" fill="none" stroke="#F7F7F7" stroke-width="22" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M512 112C711 112 875 178 875 263C875 317 854 356 830 371C812 382 790 365 762 353C687 322 606 305 512 305C313 305 149 276 149 203C149 150 313 112 512 112Z"/>
+    <path d="M149 203V494C149 567 313 609 512 609C545 609 570 585 570 552V357"/>
+    <path d="M570 407C756 416 875 471 875 536C875 613 711 675 512 675C313 675 149 642 149 568"/>
+    <path d="M149 568V754C149 837 313 901 512 901C711 901 875 837 875 754V596"/>
+    <path d="M149 494C149 565 313 609 512 609"/>
+  </g>
+</svg>

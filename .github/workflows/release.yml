@@ -1,0 +1,82 @@
+name: Build and publish macOS release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Resolve Sparkle
+        run: swift package resolve
+      - name: Import stable signing identity
+        env:
+          MACOS_CERTIFICATE_P12: ${{ secrets.MACOS_CERTIFICATE_P12 }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+        run: |
+          if [ -z "$MACOS_CERTIFICATE_P12" ]; then
+            echo "Missing MACOS_CERTIFICATE_P12 and MACOS_CERTIFICATE_PASSWORD repository secrets" >&2
+            exit 1
+          fi
+          CERT_PATH="$RUNNER_TEMP/signing.p12"
+          KEYCHAIN_PATH="$RUNNER_TEMP/build.keychain-db"
+          echo "$MACOS_CERTIFICATE_P12" | base64 --decode > "$CERT_PATH"
+          security create-keychain -p "temporary" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "temporary" "$KEYCHAIN_PATH"
+          security import "$CERT_PATH" -P "$MACOS_CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
+          security set-key-partition-list -S apple-tool:,apple: -s -k "temporary" "$KEYCHAIN_PATH"
+          security list-keychains -d user -s "$KEYCHAIN_PATH"
+          IDENTITY="$(security find-identity -p codesigning "$KEYCHAIN_PATH" | sed -n 's/.*"\(.*\)"/\1/p' | head -1)"
+          if [ -z "$IDENTITY" ]; then echo "No code signing identity imported" >&2; exit 1; fi
+          echo "CODESIGN_IDENTITY=$IDENTITY" >> "$GITHUB_ENV"
+          rm -f "$CERT_PATH"
+      - name: Build app
+        env:
+          PGQUERY_VERSION: 0.1.${{ github.run_number }}
+          PGQUERY_BUILD_NUMBER: ${{ github.run_number }}
+          SPARKLE_PUBLIC_ED_KEY: ${{ vars.SPARKLE_PUBLIC_ED_KEY }}
+        run: ./build-macos.sh
+      - name: Package app and disk image
+        env:
+          VERSION: 0.1.${{ github.run_number }}
+        run: |
+          APP="target/PgQuery.app"
+          ditto -c -k --sequesterRsrc --keepParent "$APP" "PgQuery-${VERSION}.zip"
+          hdiutil create -volname "PgQuery ${VERSION}" -srcfolder "$APP" -ov -format UDZO "PgQuery-${VERSION}.dmg"
+          codesign --verify --deep --strict "$APP"
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: 0.1.${{ github.run_number }}
+          SPARKLE_PRIVATE_ED_KEY: ${{ secrets.SPARKLE_PRIVATE_ED_KEY }}
+        run: |
+          TAG="v${VERSION}"
+          gh release create "$TAG" "PgQuery-${VERSION}.zip" "PgQuery-${VERSION}.dmg" --title "PgQuery ${VERSION}" --generate-notes
+          mkdir -p updates
+          cp "PgQuery-${VERSION}.zip" updates/
+          SPARKLE_BIN="$(find .build/artifacts -type f -name generate_appcast -print -quit)"
+          test -n "$SPARKLE_BIN"
+          if [ -z "$SPARKLE_PRIVATE_ED_KEY" ]; then echo "Missing SPARKLE_PRIVATE_ED_KEY repository secret" >&2; exit 1; fi
+          printf '%s' "$SPARKLE_PRIVATE_ED_KEY" > "$RUNNER_TEMP/sparkle_ed25519"
+          "$SPARKLE_BIN" updates --ed-key-file "$RUNNER_TEMP/sparkle_ed25519" --download-url-prefix "https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/"
+          rm -f "$RUNNER_TEMP/sparkle_ed25519"
+          cp updates/appcast.xml appcast.xml
+      - name: Commit appcast feed
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add appcast.xml
+          if ! git diff --cached --quiet; then
+            git commit -m "Publish Sparkle appcast for v0.1.${{ github.run_number }}"
+            git push origin HEAD:main
+          fi

@@ -1,0 +1,7 @@
+.DS_Store
+target/
+.build/
+*.dmg
+*.p12
+*.cer
+*.key

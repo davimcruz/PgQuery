@@ -1,0 +1,27 @@
+[package]
+name = "pgquery"
+version = "0.1.0"
+edition = "2021"
+description = "Lightweight native PostgreSQL desktop client"
+license = "MIT"
+
+[lib]
+name = "pgquery_core"
+crate-type = ["staticlib"]
+
+[dependencies]
+tokio = { version = "1", features = ["rt", "net", "time"] }
+tokio-postgres = "0.7"
+futures-util = "0.3"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+rustls-native-certs = "0.8"
+tokio-postgres-rustls = { version = "0.14", default-features = false, features = ["ring"] }
+webpki-roots = "1"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+strip = true
+panic = "abort"
+
