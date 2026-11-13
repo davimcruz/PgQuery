@@ -31,7 +31,13 @@ if [ -n "${SPARKLE_PUBLIC_ED_KEY:-}" ]; then
   /usr/libexec/PlistBuddy -c "Set :SUPublicEDKey ${SPARKLE_PUBLIC_ED_KEY}" "$APP/Contents/Info.plist"
 fi
 if [ -n "${CODESIGN_IDENTITY:-}" ]; then
-  codesign --force --deep --sign "$CODESIGN_IDENTITY" "$APP"
+  # A self-signed certificate has no Team ID. Sparkle's privileged updater
+  # helpers enforce matching Team IDs when they are conventionally signed,
+  # which makes those helpers unable to talk to this app. Keep the app signed
+  # with its stable identity for update validation, but ad-hoc sign Sparkle's
+  # nested code so its helper IPC does not require a Team ID.
+  codesign --force --deep --sign - "$APP/Contents/Frameworks/Sparkle.framework"
+  codesign --force --sign "$CODESIGN_IDENTITY" "$APP"
 else
   codesign --force --deep --sign - "$APP"
 fi
