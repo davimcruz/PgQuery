@@ -5,6 +5,7 @@ use rustls::{
     DigitallySignedStruct, Error as TlsError, SignatureScheme,
 };
 use std::{
+    collections::HashMap,
     ffi::{CStr, CString},
     os::raw::c_char,
     sync::{mpsc::{self, Receiver, Sender}, Arc, Mutex, OnceLock},
@@ -66,7 +67,7 @@ impl ServerCertVerifier for EncryptionOnlyVerifier {
 }
 
 enum Request { Connect(String), Query { sql: String, preview: bool } }
-enum Event { Status(String), Tables(Vec<String>), Schema(Vec<Vec<String>>), Results { preview: bool, headers: Vec<String>, rows: Vec<Vec<String>>, note: String }, Error(String), QueryError(String) }
+enum Event { Status(String), Tables(Vec<String>), Schema(Vec<Vec<String>>), Results { preview: bool, headers: Vec<String>, types: Vec<String>, foreign_keys: Vec<Vec<String>>, rows: Vec<Vec<String>>, note: String }, Error(String), QueryError(String) }
 
 fn json_quote(value: &str) -> String {
     let mut output = String::with_capacity(value.len() + 2);
@@ -136,6 +137,8 @@ fn worker(requests: Receiver<Request>, events: Sender<Event>) {
         Err(error) => { let _ = events.send(Event::Error(format!("Falha ao iniciar runtime: {error}"))); return; }
     };
     let mut client: Option<tokio_postgres::Client> = None;
+    // (table oid, column number) → [schema, table, column] it references.
+    let mut foreign_keys: ForeignKeys = HashMap::new();
     while let Ok(request) = requests.recv() {
         match request {
             Request::Connect(connection_string) => {
@@ -170,7 +173,8 @@ fn worker(requests: Receiver<Request>, events: Sender<Event>) {
                         };
                         let _ = events.send(Event::Status(status.into()));
                         match load_catalog(&runtime, client.as_ref().unwrap(), &events) {
-                            Ok(()) => {
+                            Ok(keys) => {
+                                foreign_keys = keys;
                                 let connected_status = if encryption_only {
                                     "Conectado · TLS ativo; certificado do servidor não verificado"
                                 } else {
@@ -200,10 +204,14 @@ fn worker(requests: Receiver<Request>, events: Sender<Event>) {
                 let Some(client) = client.as_ref() else { let _ = events.send(Event::Error("Conecte-se a um banco primeiro.".into())); continue; };
                 match query_rows(&runtime, client, &sql) {
                     Ok((headers, rows, note)) => {
-                        let _ = events.send(Event::Results { preview, headers, rows, note });
+                        let (types, fks) = column_metadata(&runtime, client, &sql, headers.len(), &foreign_keys);
+                        let _ = events.send(Event::Results { preview, headers, types, foreign_keys: fks, rows, note });
                         // Keep the sidebar and autocomplete in sync after DDL.
                         if !preview && changes_schema(&sql) {
-                            if let Err(error) = load_catalog(&runtime, client, &events) { eprintln!("Catalog reload: {error}"); }
+                            match load_catalog(&runtime, client, &events) {
+                                Ok(keys) => foreign_keys = keys,
+                                Err(error) => eprintln!("Catalog reload: {error}"),
+                            }
                         }
                     }
                     Err(error) => { let _ = events.send(Event::QueryError(error)); }
@@ -246,7 +254,7 @@ fn query_rows(runtime: &tokio::runtime::Runtime, client: &tokio_postgres::Client
 
 /// Loads tables for the sidebar and the full column catalog (schema, relation,
 /// column, type, relkind) used by the SQL editor's autocomplete.
-fn load_catalog(runtime: &tokio::runtime::Runtime, client: &tokio_postgres::Client, events: &Sender<Event>) -> Result<(), String> {
+fn load_catalog(runtime: &tokio::runtime::Runtime, client: &tokio_postgres::Client, events: &Sender<Event>) -> Result<ForeignKeys, String> {
     const TABLES: &str = "SELECT table_schema || '.' || table_name FROM information_schema.tables WHERE table_type = 'BASE TABLE' AND table_schema NOT IN ('pg_catalog', 'information_schema') ORDER BY table_schema, table_name";
     let (_, rows, _) = query_rows(runtime, client, TABLES)?;
     let tables = rows.into_iter().filter_map(|mut row| row.pop()).collect();
@@ -271,7 +279,45 @@ fn load_catalog(runtime: &tokio::runtime::Runtime, client: &tokio_postgres::Clie
         Ok::<_, String>(rows)
     })?;
     let _ = events.send(Event::Schema(rows));
-    Ok(())
+
+    // Single-column foreign keys, used to jump from a value to the row it
+    // references. Composite keys are skipped.
+    const FOREIGN_KEYS: &str = "SELECT k.conrelid::oid::text, k.conkey[1]::text, n.nspname, c.relname, a.attname \
+        FROM pg_catalog.pg_constraint k \
+        JOIN pg_catalog.pg_class c ON c.oid = k.confrelid \
+        JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+        JOIN pg_catalog.pg_attribute a ON a.attrelid = k.confrelid AND a.attnum = k.confkey[1] \
+        WHERE k.contype = 'f' AND array_length(k.conkey, 1) = 1";
+    let mut keys = ForeignKeys::new();
+    if let Ok((_, rows, _)) = query_rows(runtime, client, FOREIGN_KEYS) {
+        for row in rows {
+            if let [relid, attnum, schema, table, column] = row.as_slice() {
+                if let (Ok(relid), Ok(attnum)) = (relid.parse::<u32>(), attnum.parse::<i16>()) {
+                    keys.insert((relid, attnum), vec![schema.clone(), table.clone(), column.clone()]);
+                }
+            }
+        }
+    }
+    Ok(keys)
+}
+
+type ForeignKeys = HashMap<(u32, i16), Vec<String>>;
+
+/// Describes the result columns (type name and referenced row, if the
+/// column is a foreign key) by preparing the statement, which parses it
+/// without running it again. Multi-statement scripts cannot be prepared;
+/// they simply get no metadata.
+fn column_metadata(runtime: &tokio::runtime::Runtime, client: &tokio_postgres::Client, sql: &str, count: usize, keys: &ForeignKeys) -> (Vec<String>, Vec<Vec<String>>) {
+    if count == 0 { return (Vec::new(), Vec::new()); }
+    let Ok(statement) = runtime.block_on(client.prepare(sql)) else { return (Vec::new(), Vec::new()); };
+    let columns = statement.columns();
+    if columns.len() != count { return (Vec::new(), Vec::new()); }
+    let types = columns.iter().map(|column| column.type_().name().to_owned()).collect();
+    let fks = columns.iter().map(|column| match (column.table_oid(), column.column_id()) {
+        (Some(table), Some(id)) => keys.get(&(table, id)).cloned().unwrap_or_default(),
+        _ => Vec::new(),
+    }).collect();
+    (types, fks)
 }
 
 fn changes_schema(sql: &str) -> bool {
@@ -317,10 +363,11 @@ pub extern "C" fn pg_poll() -> *mut c_char {
         }
         Event::Error(text) => format!("{{\"kind\":\"error\",\"text\":{}}}", json_quote(&text)),
         Event::QueryError(text) => format!("{{\"kind\":\"query_error\",\"text\":{}}}", json_quote(&text)),
-        Event::Results { preview, headers, rows, note } => {
+        Event::Results { preview, headers, types, foreign_keys, rows, note } => {
             let json_rows = rows.iter().map(|row| json_strings(row)).collect::<Vec<_>>().join(",");
+            let json_keys = foreign_keys.iter().map(|key| json_strings(key)).collect::<Vec<_>>().join(",");
             let kind = if preview { "table_preview" } else { "results" };
-            format!("{{\"kind\":\"{kind}\",\"headers\":{},\"rows\":[{}],\"note\":{}}}", json_strings(&headers), json_rows, json_quote(&note))
+            format!("{{\"kind\":\"{kind}\",\"headers\":{},\"types\":{},\"foreign_keys\":[{}],\"rows\":[{}],\"note\":{}}}", json_strings(&headers), json_strings(&types), json_keys, json_rows, json_quote(&note))
         }
     };
     CString::new(message).map(CString::into_raw).unwrap_or(std::ptr::null_mut())
