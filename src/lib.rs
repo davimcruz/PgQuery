@@ -7,7 +7,6 @@ use rustls::{
 use std::{
     ffi::{CStr, CString},
     os::raw::c_char,
-    collections::HashSet,
     sync::{mpsc::{self, Receiver, Sender}, Arc, Mutex, OnceLock},
     thread,
 };
@@ -67,7 +66,7 @@ impl ServerCertVerifier for EncryptionOnlyVerifier {
 }
 
 enum Request { Connect(String), Query { sql: String, preview: bool } }
-enum Event { Status(String), Tables(Vec<String>), Columns(Vec<String>), Results { preview: bool, headers: Vec<String>, rows: Vec<Vec<String>>, note: String }, Error(String), QueryError(String) }
+enum Event { Status(String), Tables(Vec<String>), Schema(Vec<Vec<String>>), Results { preview: bool, headers: Vec<String>, rows: Vec<Vec<String>>, note: String }, Error(String), QueryError(String) }
 
 fn json_quote(value: &str) -> String {
     let mut output = String::with_capacity(value.len() + 2);
@@ -170,15 +169,8 @@ fn worker(requests: Receiver<Request>, events: Sender<Event>) {
                             "Conectado. Carregando tabelas…"
                         };
                         let _ = events.send(Event::Status(status.into()));
-                        let query = "SELECT table_schema || '.' || table_name FROM information_schema.tables WHERE table_type = 'BASE TABLE' AND table_schema NOT IN ('pg_catalog', 'information_schema') ORDER BY table_schema, table_name";
-                        match query_rows(&runtime, client.as_ref().unwrap(), query) {
-                            Ok((_, rows, _)) => {
-                                let tables = rows.into_iter().filter_map(|mut row| row.pop()).collect();
-                                let _ = events.send(Event::Tables(tables));
-                                match query_column_names(&runtime, client.as_ref().unwrap()) {
-                                    Ok(columns) => { let _ = events.send(Event::Columns(columns)); }
-                                    Err(error) => { let _ = events.send(Event::QueryError(error)); }
-                                }
+                        match load_catalog(&runtime, client.as_ref().unwrap(), &events) {
+                            Ok(()) => {
                                 let connected_status = if encryption_only {
                                     "Conectado · TLS ativo; certificado do servidor não verificado"
                                 } else {
@@ -207,7 +199,13 @@ fn worker(requests: Receiver<Request>, events: Sender<Event>) {
             Request::Query { sql, preview } => {
                 let Some(client) = client.as_ref() else { let _ = events.send(Event::Error("Conecte-se a um banco primeiro.".into())); continue; };
                 match query_rows(&runtime, client, &sql) {
-                    Ok((headers, rows, note)) => { let _ = events.send(Event::Results { preview, headers, rows, note }); }
+                    Ok((headers, rows, note)) => {
+                        let _ = events.send(Event::Results { preview, headers, rows, note });
+                        // Keep the sidebar and autocomplete in sync after DDL.
+                        if !preview && changes_schema(&sql) {
+                            if let Err(error) = load_catalog(&runtime, client, &events) { eprintln!("Catalog reload: {error}"); }
+                        }
+                    }
                     Err(error) => { let _ = events.send(Event::QueryError(error)); }
                 }
             }
@@ -246,23 +244,39 @@ fn query_rows(runtime: &tokio::runtime::Runtime, client: &tokio_postgres::Client
     })
 }
 
-fn query_column_names(runtime: &tokio::runtime::Runtime, client: &tokio_postgres::Client) -> Result<Vec<String>, String> {
-    const SQL: &str = "SELECT column_name FROM information_schema.columns WHERE table_schema NOT IN ('pg_catalog', 'information_schema') ORDER BY column_name";
-    runtime.block_on(async {
-        let stream = client.simple_query_raw(SQL).await.map_err(|e| postgres_error(&e))?;
+/// Loads tables for the sidebar and the full column catalog (schema, relation,
+/// column, type, relkind) used by the SQL editor's autocomplete.
+fn load_catalog(runtime: &tokio::runtime::Runtime, client: &tokio_postgres::Client, events: &Sender<Event>) -> Result<(), String> {
+    const TABLES: &str = "SELECT table_schema || '.' || table_name FROM information_schema.tables WHERE table_type = 'BASE TABLE' AND table_schema NOT IN ('pg_catalog', 'information_schema') ORDER BY table_schema, table_name";
+    let (_, rows, _) = query_rows(runtime, client, TABLES)?;
+    let tables = rows.into_iter().filter_map(|mut row| row.pop()).collect();
+    let _ = events.send(Event::Tables(tables));
+    const COLUMNS: &str = "SELECT n.nspname, c.relname, a.attname, pg_catalog.format_type(a.atttypid, a.atttypmod), c.relkind::text \
+        FROM pg_catalog.pg_attribute a \
+        JOIN pg_catalog.pg_class c ON c.oid = a.attrelid \
+        JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+        WHERE c.relkind IN ('r', 'v', 'm', 'f', 'p') AND a.attnum > 0 AND NOT a.attisdropped \
+          AND n.nspname NOT IN ('pg_catalog', 'information_schema') \
+          AND n.nspname NOT LIKE 'pg\\_toast%' AND n.nspname NOT LIKE 'pg\\_temp%' \
+        ORDER BY n.nspname, c.relname, a.attnum";
+    let rows = runtime.block_on(async {
+        let stream = client.simple_query_raw(COLUMNS).await.map_err(|e| postgres_error(&e))?;
         pin_mut!(stream);
-        let mut columns = Vec::new();
-        let mut seen = HashSet::new();
+        let mut rows = Vec::new();
         while let Some(message) = stream.next().await {
             if let SimpleQueryMessage::Row(row) = message.map_err(|e| postgres_error(&e))? {
-                if let Some(name) = row.get(0) {
-                    let name = name.to_owned();
-                    if seen.insert(name.clone()) { columns.push(name); }
-                }
+                rows.push((0..row.len()).map(|i| row.get(i).unwrap_or("").to_owned()).collect::<Vec<_>>());
             }
         }
-        Ok(columns)
-    })
+        Ok::<_, String>(rows)
+    })?;
+    let _ = events.send(Event::Schema(rows));
+    Ok(())
+}
+
+fn changes_schema(sql: &str) -> bool {
+    let upper = sql.to_ascii_uppercase();
+    ["CREATE ", "ALTER ", "DROP ", "RENAME ", "TRUNCATE ", "COMMENT "].iter().any(|word| upper.contains(word))
 }
 
 unsafe fn read_string(value: *const c_char) -> Option<String> {
@@ -297,7 +311,10 @@ pub extern "C" fn pg_poll() -> *mut c_char {
     let message = match event {
         Event::Status(text) => format!("{{\"kind\":\"status\",\"text\":{}}}", json_quote(&text)),
         Event::Tables(items) => format!("{{\"kind\":\"tables\",\"items\":{}}}", json_strings(&items)),
-        Event::Columns(items) => format!("{{\"kind\":\"columns\",\"items\":{}}}", json_strings(&items)),
+        Event::Schema(rows) => {
+            let items = rows.iter().map(|row| json_strings(row)).collect::<Vec<_>>().join(",");
+            format!("{{\"kind\":\"schema\",\"items\":[{}]}}", items)
+        }
         Event::Error(text) => format!("{{\"kind\":\"error\",\"text\":{}}}", json_quote(&text)),
         Event::QueryError(text) => format!("{{\"kind\":\"query_error\",\"text\":{}}}", json_quote(&text)),
         Event::Results { preview, headers, rows, note } => {
