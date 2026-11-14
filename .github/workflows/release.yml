@@ -16,6 +16,8 @@ jobs:
         with:
           fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
+      - name: Test SQL editor
+        run: scripts/test-editor.sh
       - name: Resolve Sparkle
         run: swift package resolve
       - name: Import stable signing identity
