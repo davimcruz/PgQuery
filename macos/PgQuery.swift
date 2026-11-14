@@ -234,6 +234,7 @@ final class PgQueryApp: NSObject, NSApplicationDelegate, NSTextViewDelegate, NST
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         buildWindow()
+        installBackendNotification()
         configureUpdater()
         if let savedSQL = UserDefaults.standard.string(forKey: "pgquery.last-sql") {
             queryView.string = savedSQL
@@ -246,10 +247,29 @@ final class PgQueryApp: NSObject, NSApplicationDelegate, NSTextViewDelegate, NST
             setConnected(false)
             connect()
         }
-        // Poll the Rust worker often so results show up immediately; resource
-        // stats only need a slow refresh.
-        Timer.scheduledTimer(timeInterval: 0.03, target: self, selector: #selector(pollTimer(_:)), userInfo: nil, repeats: true)
-        Timer.scheduledTimer(timeInterval: 1.0, target: self, selector: #selector(statsTimer(_:)), userInfo: nil, repeats: true)
+        // The Rust worker wakes the UI when an event is ready, so there is no
+        // fast polling timer (it kept the CPU waking ~30×/s while idle). This
+        // slow timer only refreshes the stats and drains events as a safety
+        // net; its tolerance lets macOS coalesce the wakeup.
+        let timer = Timer.scheduledTimer(timeInterval: 1.0, target: self, selector: #selector(slowTimer(_:)), userInfo: nil, repeats: true)
+        timer.tolerance = 0.5
+    }
+
+    private static weak var current: PgQueryApp?
+
+    /// Registered before the first connection so no event is missed.
+    private func installBackendNotification() {
+        PgQueryApp.current = self
+        pg_set_notify {
+            // Runs on the Rust worker thread: hop to the main thread.
+            DispatchQueue.main.async { MainActor.assumeIsolated { PgQueryApp.current?.drainBackend() } }
+        }
+    }
+
+    /// Reads every pending backend event (connecting emits several in a row).
+    private func drainBackend() {
+        for _ in 0..<256 { guard pollBackend() else { return } }
+        DispatchQueue.main.async { [weak self] in self?.drainBackend() }
     }
 
     private var connectionFileURL: URL {
@@ -333,6 +353,7 @@ final class PgQueryApp: NSObject, NSApplicationDelegate, NSTextViewDelegate, NST
         filterField.placeholderString = "Filtrar tabelas…"
         filterField.target = self
         filterField.action = #selector(filterChanged)
+        filterField.delegate = self
         tableListView.addTableColumn(NSTableColumn(identifier: NSUserInterfaceItemIdentifier("table-name")))
         tableListView.headerView = nil
         tableListView.rowHeight = 23
@@ -949,7 +970,14 @@ final class PgQueryApp: NSObject, NSApplicationDelegate, NSTextViewDelegate, NST
         }
     }
 
-    @objc private func filterChanged() { tableListView.reloadData() }
+    func controlTextDidChange(_ notification: Notification) {
+        if (notification.object as? NSTextField) === filterField { filterChanged() }
+    }
+
+    @objc private func filterChanged() {
+        cachedFilteredTables = nil
+        tableListView.reloadData()
+    }
 
     @objc private func tableSelected() {
         let visible = filteredTables
@@ -1059,13 +1087,10 @@ final class PgQueryApp: NSObject, NSApplicationDelegate, NSTextViewDelegate, NST
         resultNote.stringValue = "Resultado copiado"
     }
 
-    @objc private func pollTimer(_ timer: Timer) {
-        // Drain every pending event: connecting emits several in a row.
-        for _ in 0..<32 { guard pollBackend() else { break } }
-    }
-
-    @objc private func statsTimer(_ timer: Timer) {
-        updateResourceStats()
+    @objc private func slowTimer(_ timer: Timer) {
+        drainBackend()
+        // No point measuring while the window is hidden or minimized.
+        if window.occlusionState.contains(.visible) { updateResourceStats() }
     }
 
     private func updateResourceStats() {
@@ -1106,9 +1131,16 @@ final class PgQueryApp: NSObject, NSApplicationDelegate, NSTextViewDelegate, NST
         UserDefaults.standard.set(queryView.string, forKey: "pgquery.last-sql")
     }
 
+    /// Cached: the sidebar asks for it once per row and per redraw, and a
+    /// database can have thousands of tables.
+    private var cachedFilteredTables: [String]?
+
     private var filteredTables: [String] {
+        if let cachedFilteredTables { return cachedFilteredTables }
         let needle = filterField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        return needle.isEmpty ? tables : tables.filter { displayName(for: $0).localizedCaseInsensitiveContains(needle) }
+        let result = needle.isEmpty ? tables : tables.filter { displayName(for: $0).localizedCaseInsensitiveContains(needle) }
+        cachedFilteredTables = result
+        return result
     }
 
     private func displayName(for table: String) -> String {
@@ -1323,6 +1355,8 @@ final class PgQueryApp: NSObject, NSApplicationDelegate, NSTextViewDelegate, NST
               sender.tag < resultRows.count, column < resultRows[sender.tag].count else { return }
         let target = resultForeignKeys[column]
         let value = resultRows[sender.tag][column]
+        // Each snapshot can hold up to 2 MB of rows, so keep the history short.
+        if navigationStack.count >= 20 { navigationStack.removeFirst() }
         navigationStack.append(ResultSnapshot(headers: resultHeaders, types: resultTypes, foreignKeys: resultForeignKeys,
                                               rows: resultRows, note: resultNote.stringValue, selectedRow: sender.tag))
         let quote = { (identifier: String) in "\"" + identifier.replacingOccurrences(of: "\"", with: "\"\"") + "\"" }
@@ -1400,6 +1434,7 @@ final class PgQueryApp: NSObject, NSApplicationDelegate, NSTextViewDelegate, NST
             tableListView.reloadData()
         case "tables":
             tables = event["items"] as? [String] ?? []
+            cachedFilteredTables = nil
             tableListView.reloadData()
         case "schema":
             let rows = event["items"] as? [[String]] ?? []
