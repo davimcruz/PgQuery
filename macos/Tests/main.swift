@@ -147,5 +147,21 @@ do {
     check(!auto("SELECT 1.|", .dot), "decimal point does not open")
 }
 
+// MARK: Value formatting
+do {
+    let f = ValueFormatter(locale: Locale(identifier: "pt_BR"), timeZone: TimeZone(identifier: "America/Sao_Paulo")!)
+    check(f.display("t", type: "bool") == "true" && f.display("f", type: "bool") == "false", "booleans")
+    check(f.display("t", type: "text") == "t", "text untouched")
+    check(f.display("{t,f,NULL}", type: "_bool") == "{true,false,NULL}", "boolean arrays")
+    check(f.display("2026-11-14", type: "date") == "14/11/2026", "date: \(f.display("2026-11-14", type: "date"))")
+    check(f.display("2026-11-14 03:40:24.123456+00", type: "timestamptz") == "14/11/2026, 00:40:24", "timestamptz in local zone: \(f.display("2026-11-14 03:40:24.123456+00", type: "timestamptz"))")
+    check(f.display("2026-11-14 03:40:24+05:30", type: "timestamptz") == "13/11/2026, 19:10:24", "offset with minutes: \(f.display("2026-11-14 03:40:24+05:30", type: "timestamptz"))")
+    check(f.display("2026-11-14 03:40:24", type: "timestamp") == "14/11/2026, 03:40:24", "timestamp as written")
+    check(f.display("infinity", type: "timestamptz") == "infinity", "infinity untouched")
+    check(f.display("2026-11-14 03:40:24 BC", type: "timestamp") == "2026-11-14 03:40:24 BC", "BC untouched")
+    let detail = f.detail("2026-11-14 03:40:24.5+00", type: "timestamptz")
+    check(detail.original == "2026-11-14 03:40:24.5+00" && detail.value.contains("2026"), "detail keeps original: \(detail)")
+}
+
 print(failures == 0 ? "✓ \(passed) checks passed" : "\(failures) failed, \(passed) passed")
 exit(failures == 0 ? 0 : 1)
