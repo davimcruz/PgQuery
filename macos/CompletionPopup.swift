@@ -7,7 +7,7 @@ final class CompletionPopup: NSObject, NSTableViewDataSource, NSTableViewDelegat
     private(set) var items: [CompletionItem] = []
     private var prefix = ""
     private let panel: NSPanel
-    private let tableView = NSTableView()
+    private let tableView = PointerListView()
     private let scrollView = NSScrollView()
     private let footer = NSTextField(labelWithString: "")
     private weak var parentWindow: NSWindow?
@@ -266,5 +266,14 @@ private final class CompletionCellView: NSTableCellView {
         case .function: return .systemIndigo
         case .keyword: return .systemPurple
         }
+    }
+}
+
+/// Suggestion rows are clickable: show the pointing hand over them. Cursor
+/// rects work even though the panel never becomes the key window.
+private final class PointerListView: NSTableView {
+    override func resetCursorRects() {
+        super.resetCursorRects()
+        addCursorRect(visibleRect, cursor: .pointingHand)
     }
 }

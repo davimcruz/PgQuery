@@ -49,20 +49,18 @@ final class ResultsGridView: PointerTableView {
     }
 }
 
+/// Cursor rects are AppKit's own mechanism for hover cursors: they survive
+/// scrolling, relayout and views that are rebuilt under the mouse, unlike a
+/// tracking area that sets the cursor once on entry. Disabled controls keep
+/// the arrow because they cannot be clicked.
 @MainActor
 class PointerButton: NSButton {
-    private var pointerTrackingArea: NSTrackingArea?
-
-    override func updateTrackingAreas() {
-        if let pointerTrackingArea { removeTrackingArea(pointerTrackingArea) }
-        super.updateTrackingAreas()
-        let area = NSTrackingArea(rect: .zero, options: [.mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect], owner: self, userInfo: nil)
-        addTrackingArea(area)
-        pointerTrackingArea = area
+    override var isEnabled: Bool { didSet { window?.invalidateCursorRects(for: self) } }
+    override func viewDidMoveToWindow() { super.viewDidMoveToWindow(); window?.invalidateCursorRects(for: self) }
+    override func resetCursorRects() {
+        super.resetCursorRects()
+        if isEnabled { addCursorRect(bounds, cursor: .pointingHand) }
     }
-
-    override func mouseEntered(with event: NSEvent) { NSCursor.pointingHand.set() }
-    override func mouseExited(with event: NSEvent) { NSCursor.arrow.set() }
 }
 
 private final class DetailDocumentView: NSView {
@@ -71,30 +69,22 @@ private final class DetailDocumentView: NSView {
 
 @MainActor
 final class PointerPopupButton: NSPopUpButton {
-    private var pointerTrackingArea: NSTrackingArea?
-    override func updateTrackingAreas() {
-        if let pointerTrackingArea { removeTrackingArea(pointerTrackingArea) }
-        super.updateTrackingAreas()
-        let area = NSTrackingArea(rect: .zero, options: [.mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect], owner: self, userInfo: nil)
-        addTrackingArea(area)
-        pointerTrackingArea = area
+    override var isEnabled: Bool { didSet { window?.invalidateCursorRects(for: self) } }
+    override func viewDidMoveToWindow() { super.viewDidMoveToWindow(); window?.invalidateCursorRects(for: self) }
+    override func resetCursorRects() {
+        super.resetCursorRects()
+        if isEnabled { addCursorRect(bounds, cursor: .pointingHand) }
     }
-    override func mouseEntered(with event: NSEvent) { NSCursor.pointingHand.set() }
-    override func mouseExited(with event: NSEvent) { NSCursor.arrow.set() }
 }
 
 @MainActor
 final class PointerSegmentedControl: NSSegmentedControl {
-    private var pointerTrackingArea: NSTrackingArea?
-    override func updateTrackingAreas() {
-        if let pointerTrackingArea { removeTrackingArea(pointerTrackingArea) }
-        super.updateTrackingAreas()
-        let area = NSTrackingArea(rect: .zero, options: [.mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect], owner: self, userInfo: nil)
-        addTrackingArea(area)
-        pointerTrackingArea = area
+    override var isEnabled: Bool { didSet { window?.invalidateCursorRects(for: self) } }
+    override func viewDidMoveToWindow() { super.viewDidMoveToWindow(); window?.invalidateCursorRects(for: self) }
+    override func resetCursorRects() {
+        super.resetCursorRects()
+        if isEnabled { addCursorRect(bounds, cursor: .pointingHand) }
     }
-    override func mouseEntered(with event: NSEvent) { NSCursor.pointingHand.set() }
-    override func mouseExited(with event: NSEvent) { NSCursor.arrow.set() }
 }
 
 /// Row view for the results grid that closes the last column with a grid
