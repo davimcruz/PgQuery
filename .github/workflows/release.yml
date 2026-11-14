@@ -42,15 +42,23 @@ jobs:
           if [ -z "$IDENTITY" ]; then echo "No code signing identity imported" >&2; exit 1; fi
           echo "CODESIGN_IDENTITY=$IDENTITY" >> "$GITHUB_ENV"
           rm -f "$CERT_PATH"
+      - name: Compute version
+        run: |
+          # v1.0.0 was the workflow run FIRST_RUN; every later push to main
+          # bumps the patch number (1.0.1, 1.0.2, …). For a new minor or
+          # major release, change MAJOR_MINOR and set FIRST_RUN to that run.
+          MAJOR_MINOR=1.0
+          FIRST_RUN=14
+          PATCH=$(( ${{ github.run_number }} - FIRST_RUN ))
+          if [ "$PATCH" -lt 0 ]; then PATCH=0; fi
+          echo "VERSION=${MAJOR_MINOR}.${PATCH}" >> "$GITHUB_ENV"
       - name: Build app
         env:
-          PGQUERY_VERSION: 0.1.${{ github.run_number }}
+          PGQUERY_VERSION: ${{ env.VERSION }}
           PGQUERY_BUILD_NUMBER: ${{ github.run_number }}
           SPARKLE_PUBLIC_ED_KEY: ${{ vars.SPARKLE_PUBLIC_ED_KEY }}
         run: ./build-macos.sh
       - name: Package app and disk image
-        env:
-          VERSION: 0.1.${{ github.run_number }}
         run: |
           APP="target/PgQuery.app"
           ditto -c -k --sequesterRsrc --keepParent "$APP" "PgQuery-${VERSION}.zip"
@@ -64,7 +72,6 @@ jobs:
       - name: Publish GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
-          VERSION: 0.1.${{ github.run_number }}
           SPARKLE_PRIVATE_ED_KEY: ${{ secrets.SPARKLE_PRIVATE_ED_KEY }}
         run: |
           TAG="v${VERSION}"
@@ -89,6 +96,6 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add appcast.xml
           if ! git diff --cached --quiet; then
-            git commit -m "Publish Sparkle appcast for v0.1.${{ github.run_number }}"
+            git commit -m "Publish Sparkle appcast for v${VERSION}"
             git push origin HEAD:main
           fi

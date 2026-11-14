@@ -28,7 +28,7 @@ ditto "$sparkle_framework" "$APP/Contents/Frameworks/Sparkle.framework"
 cp macos/Info.plist "$APP/Contents/Info.plist"
 cp macos/PkgInfo "$APP/Contents/PkgInfo"
 swift -module-cache-path target/swift-module-cache macos/make-icon.swift "$APP/Contents/Resources/AppIcon.icns"
-/usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString ${PGQUERY_VERSION:-0.1.1}" "$APP/Contents/Info.plist"
+/usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString ${PGQUERY_VERSION:-1.0.0}" "$APP/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :CFBundleVersion ${PGQUERY_BUILD_NUMBER:-1}" "$APP/Contents/Info.plist"
 if [ -n "${SPARKLE_PUBLIC_ED_KEY:-}" ]; then
   /usr/libexec/PlistBuddy -c "Set :SUPublicEDKey ${SPARKLE_PUBLIC_ED_KEY}" "$APP/Contents/Info.plist"
