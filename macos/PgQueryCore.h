@@ -5,3 +5,6 @@ void pg_query(const char *value);
 void pg_select_table(const char *value);
 char * _Nullable pg_poll(void);
 void pg_string_free(char * _Nullable value);
+
+typedef void (*pg_notify_callback)(void);
+void pg_set_notify(pg_notify_callback _Nullable callback);
