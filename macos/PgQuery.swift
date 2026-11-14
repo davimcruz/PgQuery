@@ -607,7 +607,9 @@ final class PgQueryApp: NSObject, NSApplicationDelegate, NSTextViewDelegate, NST
         _ = add("Executar instrução atual", #selector(runCurrentStatement), "\r", target: self)
         _ = add("Executar tudo (ou seleção)", #selector(runQuery), "r", target: self)
         sqlMenu.addItem(.separator())
-        _ = add("Mostrar sugestões", #selector(SQLTextView.showCompletions(_:)), "\u{1b}", [])
+        // ⎋ / ⌃Space are handled by the editor itself: a menu shortcut on ⎋
+        // would steal the key that closes the suggestion list.
+        _ = add("Mostrar sugestões (⎋ ou ⌃Espaço)", #selector(SQLTextView.showCompletions(_:)), "", [])
         let suggest = add("Sugerir colunas enquanto digita", #selector(toggleSuggestWhileTyping(_:)), "", target: self)
         suggest.state = UserDefaults.standard.bool(forKey: "pgquery.suggest-while-typing") ? .on : .off
         suggestWhileTypingItem = suggest
