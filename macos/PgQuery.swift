@@ -103,7 +103,7 @@ final class PgQueryApp: NSObject, NSApplicationDelegate, NSTextViewDelegate, NST
     private var window: NSWindow!
     private let connectionField = NSTextField()
     private let filterField = NSTextField()
-    private let queryView = NSTextView()
+    private let queryView = SQLTextView()
     private let tableListView = PointerTableView()
     private let resultsTableView = ResultsGridView()
     private let resultFilters = NSStackView()
@@ -131,7 +131,10 @@ final class PgQueryApp: NSObject, NSApplicationDelegate, NSTextViewDelegate, NST
     private let connectionBar = NSStackView()
     private let connectedBar = NSStackView()
     private var tables: [String] = []
-    private var autocompleteColumns: [String] = []
+    private var lastExecutedSQL = ""
+    private var lastExecutedOffset = 0
+    private var saveSQLWorkItem: DispatchWorkItem?
+    private var suggestWhileTypingItem: NSMenuItem?
     private var resultHeaders: [String] = []
     private var resultRows: [[String]] = []
     private var resultSortColumn: Int?
@@ -171,7 +174,7 @@ final class PgQueryApp: NSObject, NSApplicationDelegate, NSTextViewDelegate, NST
         configureUpdater()
         if let savedSQL = UserDefaults.standard.string(forKey: "pgquery.last-sql") {
             queryView.string = savedSQL
-            highlightSQL()
+            queryView.setSelectedRange(NSRange(location: (savedSQL as NSString).length, length: 0))
         }
         if let savedURL = loadSavedConnectionURL() {
             connectionURL = savedURL
@@ -180,7 +183,10 @@ final class PgQueryApp: NSObject, NSApplicationDelegate, NSTextViewDelegate, NST
             setConnected(false)
             connect()
         }
-        Timer.scheduledTimer(timeInterval: 0.5, target: self, selector: #selector(pollTimer(_:)), userInfo: nil, repeats: true)
+        // Poll the Rust worker often so results show up immediately; resource
+        // stats only need a slow refresh.
+        Timer.scheduledTimer(timeInterval: 0.03, target: self, selector: #selector(pollTimer(_:)), userInfo: nil, repeats: true)
+        Timer.scheduledTimer(timeInterval: 1.0, target: self, selector: #selector(statsTimer(_:)), userInfo: nil, repeats: true)
     }
 
     private var connectionFileURL: URL {
@@ -289,12 +295,22 @@ final class PgQueryApp: NSObject, NSApplicationDelegate, NSTextViewDelegate, NST
 
         let sqlTitle = NSTextField(labelWithString: "SQL")
         sqlTitle.font = .boldSystemFont(ofSize: 14)
-        configureTextView(queryView, text: "-- Escreva SQL aqui e clique em Executar\nSELECT current_database(), current_user;")
+        queryView.string = "-- ⌘↩ executa a instrução sob o cursor · ⌘R executa tudo · ⎋ mostra sugestões\nSELECT current_database(), current_user;"
         queryView.delegate = self
-        highlightSQL()
+        queryView.suggestWhileTyping = UserDefaults.standard.bool(forKey: "pgquery.suggest-while-typing")
+        if UserDefaults.standard.object(forKey: "pgquery.editor-font-size") != nil {
+            queryView.fontSize = CGFloat(UserDefaults.standard.double(forKey: "pgquery.editor-font-size"))
+        }
         let sqlScroll = scrollView(for: queryView)
         sqlScrollView = sqlScroll
         applyRoundedBorder(to: sqlScroll)
+        sqlScroll.hasVerticalScroller = true
+        sqlScroll.autohidesScrollers = true
+        queryView.minSize = NSSize(width: 0, height: 0)
+        queryView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
+        sqlScroll.verticalRulerView = LineNumberRulerView(textView: queryView, scrollView: sqlScroll)
+        sqlScroll.hasVerticalRuler = true
+        sqlScroll.rulersVisible = true
         resultsTableView.headerView = NSTableHeaderView()
         resultsTableView.rowHeight = 23
         resultsTableView.usesAlternatingRowBackgroundColors = true
@@ -381,8 +397,7 @@ final class PgQueryApp: NSObject, NSApplicationDelegate, NSTextViewDelegate, NST
         let runButton = PointerButton(title: "Executar SQL", target: self, action: #selector(runQuery))
         sqlRunButton = runButton
         runButton.bezelStyle = .rounded
-        runButton.keyEquivalent = "r"
-        runButton.keyEquivalentModifierMask = .command
+        runButton.toolTip = "Executa a seleção ou todo o editor (⌘R). ⌘↩ executa só a instrução sob o cursor."
         let clearButton = PointerButton(title: "Limpar", target: self, action: #selector(clearResults))
         clearResultsButton = clearButton
         clearButton.bezelStyle = .rounded
@@ -510,16 +525,6 @@ final class PgQueryApp: NSObject, NSApplicationDelegate, NSTextViewDelegate, NST
         window.makeFirstResponder(queryView)
     }
 
-    private func configureTextView(_ view: NSTextView, text: String) {
-        view.string = text
-        view.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
-        view.isRichText = false
-        view.isVerticallyResizable = true
-        view.isHorizontallyResizable = true
-        view.autoresizingMask = [.width]
-        view.textContainer?.widthTracksTextView = true
-    }
-
     private func applyRoundedCorners(_ view: NSView) {
         view.wantsLayer = true
         view.layer?.cornerRadius = 8
@@ -574,6 +579,47 @@ final class PgQueryApp: NSObject, NSApplicationDelegate, NSTextViewDelegate, NST
             item.keyEquivalentModifierMask = .command
             editMenu.addItem(item)
         }
+        editMenu.addItem(.separator())
+        // NSTextFinder actions: show find, next, previous, use selection, replace.
+        for (title, key, modifiers, tag) in [
+            ("Buscar…", "f", NSEvent.ModifierFlags.command, 1), ("Buscar e substituir…", "f", [.command, .option], 12),
+            ("Buscar próxima", "g", .command, 2), ("Buscar anterior", "g", [.command, .shift], 3),
+            ("Usar seleção para buscar", "e", .command, 7),
+        ] as [(String, String, NSEvent.ModifierFlags, Int)] {
+            let item = NSMenuItem(title: title, action: #selector(NSTextView.performTextFinderAction(_:)), keyEquivalent: key)
+            item.keyEquivalentModifierMask = modifiers
+            item.tag = tag
+            editMenu.addItem(item)
+        }
+
+        let sqlItem = NSMenuItem()
+        sqlItem.title = "SQL"
+        let sqlMenu = NSMenu(title: "SQL")
+        sqlItem.submenu = sqlMenu
+        menu.addItem(sqlItem)
+        func add(_ title: String, _ action: Selector, _ key: String, _ modifiers: NSEvent.ModifierFlags = .command, target: AnyObject? = nil) -> NSMenuItem {
+            let item = NSMenuItem(title: title, action: action, keyEquivalent: key)
+            item.keyEquivalentModifierMask = modifiers
+            item.target = target
+            sqlMenu.addItem(item)
+            return item
+        }
+        _ = add("Executar instrução atual", #selector(runCurrentStatement), "\r", target: self)
+        _ = add("Executar tudo (ou seleção)", #selector(runQuery), "r", target: self)
+        sqlMenu.addItem(.separator())
+        _ = add("Mostrar sugestões", #selector(SQLTextView.showCompletions(_:)), "\u{1b}", [])
+        let suggest = add("Sugerir colunas enquanto digita", #selector(toggleSuggestWhileTyping(_:)), "", target: self)
+        suggest.state = UserDefaults.standard.bool(forKey: "pgquery.suggest-while-typing") ? .on : .off
+        suggestWhileTypingItem = suggest
+        sqlMenu.addItem(.separator())
+        _ = add("Comentar/descomentar linhas", #selector(SQLTextView.toggleLineComment(_:)), "/")
+        _ = add("Duplicar linha", #selector(SQLTextView.duplicateLine(_:)), "d")
+        _ = add("Indentar", #selector(indentSelection(_:)), "]", target: self)
+        _ = add("Desindentar", #selector(outdentSelection(_:)), "[", target: self)
+        sqlMenu.addItem(.separator())
+        _ = add("Aumentar fonte", #selector(changeEditorFont(_:)), "+", target: self).tag = 1
+        _ = add("Diminuir fonte", #selector(changeEditorFont(_:)), "-", target: self).tag = -1
+        _ = add("Tamanho padrão", #selector(changeEditorFont(_:)), "0", target: self).tag = 0
         NSApp.mainMenu = menu
     }
 
@@ -832,11 +878,63 @@ final class PgQueryApp: NSObject, NSApplicationDelegate, NSTextViewDelegate, NST
         visible[index].withCString { pg_select_table($0) }
     }
 
+    /// ⌘R / button: runs the selection, or the whole editor.
     @objc private func runQuery() {
-        guard !queryView.string.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        let source = queryView.string as NSString
+        let selection = queryView.selectedRange()
+        let range = selection.length > 0 ? SQLLexer.trim(selection, in: source) : NSRange(location: 0, length: source.length)
+        execute(range)
+    }
+
+    /// ⌘↩: runs the selection, or only the statement under the caret.
+    @objc private func runCurrentStatement() {
+        guard let range = queryView.executableRange() else { NSSound.beep(); return }
+        queryView.flash(range)
+        execute(range)
+    }
+
+    private func execute(_ range: NSRange) {
+        let source = queryView.string as NSString
+        guard range.length > 0, NSMaxRange(range) <= source.length else { return }
+        let sql = source.substring(with: range)
+        guard !sql.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        queryView.hideCompletions()
         clearResults()
         resultNote.stringValue = "Executando…"
-        queryView.string.withCString { pg_query($0) }
+        resultNote.toolTip = nil
+        lastExecutedSQL = sql
+        lastExecutedOffset = range.location
+        sql.withCString { pg_query($0) }
+    }
+
+    @objc private func toggleSuggestWhileTyping(_ sender: NSMenuItem) {
+        queryView.suggestWhileTyping.toggle()
+        sender.state = queryView.suggestWhileTyping ? .on : .off
+        UserDefaults.standard.set(queryView.suggestWhileTyping, forKey: "pgquery.suggest-while-typing")
+    }
+
+    @objc private func indentSelection(_ sender: Any?) { queryView.shiftSelectedLines(outdent: false) }
+    @objc private func outdentSelection(_ sender: Any?) { queryView.shiftSelectedLines(outdent: true) }
+
+    @objc private func changeEditorFont(_ sender: NSMenuItem) {
+        switch sender.tag {
+        case 1: queryView.fontSize += 1
+        case -1: queryView.fontSize -= 1
+        default: queryView.fontSize = 13
+        }
+        UserDefaults.standard.set(Double(queryView.fontSize), forKey: "pgquery.editor-font-size")
+    }
+
+    /// Maps PostgreSQL's 1-based character position in the executed SQL to
+    /// the editor and underlines it.
+    private func highlightErrorPosition(in message: String) {
+        guard let match = message.range(of: #"Posição na consulta: (\d+)"#, options: .regularExpression),
+              let position = Int(message[match].split(separator: " ").last ?? ""), position > 0 else { return }
+        let scalars = lastExecutedSQL.unicodeScalars
+        guard let index = scalars.index(scalars.startIndex, offsetBy: position - 1, limitedBy: scalars.endIndex) else { return }
+        let offset = lastExecutedSQL.utf16.distance(from: lastExecutedSQL.utf16.startIndex, to: index.samePosition(in: lastExecutedSQL.utf16) ?? lastExecutedSQL.utf16.endIndex)
+        window.makeFirstResponder(queryView)
+        queryView.markError(at: lastExecutedOffset + offset)
     }
 
     @objc private func clearResults() {
@@ -871,7 +969,11 @@ final class PgQueryApp: NSObject, NSApplicationDelegate, NSTextViewDelegate, NST
     }
 
     @objc private func pollTimer(_ timer: Timer) {
-        pollBackend()
+        // Drain every pending event: connecting emits several in a row.
+        for _ in 0..<32 { guard pollBackend() else { break } }
+    }
+
+    @objc private func statsTimer(_ timer: Timer) {
         updateResourceStats()
     }
 
@@ -899,102 +1001,18 @@ final class PgQueryApp: NSObject, NSApplicationDelegate, NSTextViewDelegate, NST
 
     func textDidChange(_ notification: Notification) {
         guard (notification.object as? NSTextView) === queryView else { return }
+        // Persist the editor contents shortly after typing stops.
+        saveSQLWorkItem?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            UserDefaults.standard.set(self.queryView.string, forKey: "pgquery.last-sql")
+        }
+        saveSQLWorkItem = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4, execute: work)
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
         UserDefaults.standard.set(queryView.string, forKey: "pgquery.last-sql")
-        highlightSQL()
-        // Keep suggestions lightweight: only open the native completion list
-        // after the user has typed a meaningful identifier prefix.
-        let range = queryView.selectedRange()
-        if range.length == 0,
-           let prefix = currentSQLPrefix(in: queryView.string as NSString, caret: range.location),
-           prefix.count >= 2,
-           completionCandidates(matching: prefix).count > 0 {
-            DispatchQueue.main.async { [weak self] in self?.queryView.complete(nil) }
-        }
-    }
-
-    func textView(_ textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
-        if textView === queryView, commandSelector == #selector(NSTextView.complete(_:)) {
-            textView.complete(nil)
-            return true
-        }
-        guard textView === queryView, commandSelector == #selector(NSResponder.insertNewline(_:)) else { return false }
-        let source = textView.string as NSString
-        let cursor = min(textView.selectedRange().location, source.length)
-        let lineStart = source.range(of: "\n", options: .backwards, range: NSRange(location: 0, length: cursor)).location
-        let start = lineStart == NSNotFound ? 0 : lineStart + 1
-        let prefix = source.substring(with: NSRange(location: start, length: cursor - start))
-        let indentation = String(prefix.prefix { $0 == " " || $0 == "\t" })
-        textView.insertText("\n" + indentation, replacementRange: textView.selectedRange())
-        return true
-    }
-
-    func textView(_ textView: NSTextView, completions words: [String], forPartialWordRange charRange: NSRange, indexOfSelectedItem index: UnsafeMutablePointer<Int>?) -> [String] {
-        guard textView === queryView else { return [] }
-        let source = textView.string as NSString
-        let prefix = source.substring(with: charRange)
-        let beginsInsideQuotes = charRange.location > 0 && source.substring(with: NSRange(location: charRange.location - 1, length: 1)) == "\""
-        let end = charRange.location + charRange.length
-        let hasClosingQuote = beginsInsideQuotes && end < source.length && source.substring(with: NSRange(location: end, length: 1)) == "\""
-        return completionCandidates(matching: prefix, insideQuotedIdentifier: beginsInsideQuotes, hasClosingQuote: hasClosingQuote)
-    }
-
-    private func currentSQLPrefix(in source: NSString, caret: Int) -> String? {
-        guard caret >= 0, caret <= source.length else { return nil }
-        var start = caret
-        while start > 0 {
-            let character = source.substring(with: NSRange(location: start - 1, length: 1))
-            guard character.rangeOfCharacter(from: CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "_$\"."))) != nil else { break }
-            start -= 1
-        }
-        guard start < caret else { return nil }
-        return source.substring(with: NSRange(location: start, length: caret - start)).trimmingCharacters(in: CharacterSet(charactersIn: "\"."))
-    }
-
-    private func completionCandidates(matching prefix: String, insideQuotedIdentifier: Bool = false, hasClosingQuote: Bool = false) -> [String] {
-        let normalizedPrefix = prefix.trimmingCharacters(in: CharacterSet(charactersIn: "\"."))
-        guard !normalizedPrefix.isEmpty else { return [] }
-        var candidates: [(name: String, insertion: String)] = []
-        for table in tables {
-            let pieces = table.split(separator: ".", maxSplits: 1).map(String.init)
-            guard let name = pieces.last else { continue }
-            let insertion = pieces.count == 2 && pieces[0] != "public" ? "\(sqlIdentifier(pieces[0])).\(sqlIdentifier(name))" : sqlIdentifier(name)
-            candidates.append((name, insertion))
-        }
-        candidates.append(contentsOf: autocompleteColumns.map { ($0, sqlIdentifier($0)) })
-        let matching = candidates.filter { $0.name.localizedLowercase.hasPrefix(normalizedPrefix.localizedLowercase) }
-        let unique = Dictionary(matching.map { ($0.insertion, $0) }, uniquingKeysWith: { first, _ in first })
-        return unique.values.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }.prefix(80).map {
-            if insideQuotedIdentifier { return $0.name + (hasClosingQuote ? "" : "\"") }
-            return $0.insertion
-        }
-    }
-
-    private func sqlIdentifier(_ identifier: String) -> String {
-        "\"\(identifier.replacingOccurrences(of: "\"", with: "\"\""))\""
-    }
-
-    private func highlightSQL() {
-        guard let storage = queryView.textStorage else { return }
-        let source = queryView.string as NSString
-        let fullRange = NSRange(location: 0, length: source.length)
-        storage.beginEditing()
-        storage.setAttributes([
-            .font: NSFont.monospacedSystemFont(ofSize: 12, weight: .regular),
-            .foregroundColor: NSColor.labelColor,
-        ], range: fullRange)
-        colorMatches(#"\b(SELECT|FROM|WHERE|JOIN|LEFT|RIGHT|INNER|OUTER|ON|AS|AND|OR|NOT|NULL|IS|IN|LIKE|ILIKE|GROUP|BY|ORDER|ASC|DESC|LIMIT|OFFSET|INSERT|INTO|VALUES|UPDATE|SET|DELETE|CREATE|ALTER|DROP|TABLE|VIEW|INDEX|DATABASE|SCHEMA|RETURNING|DISTINCT|UNION|ALL|CASE|WHEN|THEN|ELSE|END|WITH|EXISTS|BETWEEN|TRUE|FALSE|PRIMARY|KEY|FOREIGN|REFERENCES|CONSTRAINT|DEFAULT|BEGIN|COMMIT|ROLLBACK|COUNT|SUM|AVG|MIN|MAX)\b"#, in: source, color: .systemBlue)
-        colorMatches(#"\b\d+(?:\.\d+)?\b"#, in: source, color: .systemPurple)
-        colorMatches(#"'(?:''|[^'])*'"#, in: source, color: .systemOrange)
-        colorMatches(#"--[^\n]*|/\*[\s\S]*?\*/"#, in: source, color: .systemGreen)
-        storage.endEditing()
-    }
-
-    private func colorMatches(_ pattern: String, in source: NSString, color: NSColor) {
-        guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else { return }
-        let range = NSRange(location: 0, length: source.length)
-        for match in regex.matches(in: source as String, range: range) {
-            queryView.textStorage?.addAttribute(.foregroundColor, value: color, range: match.range)
-        }
     }
 
     private var filteredTables: [String] {
@@ -1190,12 +1208,13 @@ final class PgQueryApp: NSObject, NSApplicationDelegate, NSTextViewDelegate, NST
         resultNote.stringValue = selected.count == 1 ? "Linha copiada como JSON" : "\(selected.count) linhas copiadas como JSON"
     }
 
-    private func pollBackend() {
-        guard let pointer = pg_poll() else { return }
+    @discardableResult
+    private func pollBackend() -> Bool {
+        guard let pointer = pg_poll() else { return false }
         defer { pg_string_free(pointer) }
         let data = Data(String(cString: pointer).utf8)
         guard let event = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
-              let kind = event["kind"] as? String else { return }
+              let kind = event["kind"] as? String else { return true }
         switch kind {
         case "status":
             let text = event["text"] as? String ?? ""
@@ -1209,8 +1228,9 @@ final class PgQueryApp: NSObject, NSApplicationDelegate, NSTextViewDelegate, NST
         case "tables":
             tables = event["items"] as? [String] ?? []
             tableListView.reloadData()
-        case "columns":
-            autocompleteColumns = event["items"] as? [String] ?? []
+        case "schema":
+            let rows = event["items"] as? [[String]] ?? []
+            queryView.engine = SQLCompletionEngine(catalog: SchemaCatalog(rows: rows))
         case "results", "table_preview":
             closeRowDetails()
             hasExecutedQuery = kind == "results"
@@ -1243,8 +1263,9 @@ final class PgQueryApp: NSObject, NSApplicationDelegate, NSTextViewDelegate, NST
             alert.messageText = "Erro ao executar SQL"
             alert.informativeText = message
             alert.alertStyle = .warning
-            alert.beginSheetModal(for: window)
+            alert.beginSheetModal(for: window) { [weak self] _ in self?.highlightErrorPosition(in: message) }
         default: break
         }
+        return true
     }
 }
