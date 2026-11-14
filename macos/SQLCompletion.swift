@@ -488,6 +488,9 @@ struct SQLCompletionEngine {
                 var seen: [String: Int] = [:]
                 for relation in catalog.relations {
                     for col in relation.columns {
+                        // Filter before building items: a large catalog has
+                        // tens of thousands of columns.
+                        guard Self.matchScore(col.name, prefix: context.prefix) != nil else { continue }
                         if let existing = seen[col.name] {
                             items[existing].detail = col.type + " · várias tabelas"
                         } else {
