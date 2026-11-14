@@ -169,10 +169,7 @@ final class PgQueryApp: NSObject, NSApplicationDelegate, NSTextViewDelegate, NST
     private let queryView = SQLTextView()
     private let tableListView = PointerTableView()
     private let resultsTableView = ResultsGridView()
-    private let resultFilters = NSStackView()
-    private let resultFilterButton = PointerButton(title: "Filtrar", target: nil, action: nil)
-    private let resultFilterField = NSSearchField()
-    private var activeResultFilterColumn: Int?
+    private let filterBar = ResultFilterBar()
     private let detailStack = NSStackView()
     private var detailPanel: NSVisualEffectView!
     private var detailScrollView: NSScrollView!
@@ -413,23 +410,8 @@ final class PgQueryApp: NSObject, NSApplicationDelegate, NSTextViewDelegate, NST
         applyRoundedBorder(to: resultScroll)
         resultScroll.documentView = resultsTableView
         resultScroll.translatesAutoresizingMaskIntoConstraints = false
-        resultFilters.orientation = .horizontal
-        resultFilters.alignment = .centerY
-        resultFilters.spacing = 8
-        resultFilters.translatesAutoresizingMaskIntoConstraints = false
-        resultFilterButton.target = self
-        resultFilterButton.action = #selector(chooseResultFilterColumn)
-        resultFilterButton.bezelStyle = .rounded
-        resultFilterField.placeholderString = "Filtrar…"
-        resultFilterField.identifier = NSUserInterfaceItemIdentifier("result-filter-input")
-        resultFilterField.target = self
-        resultFilterField.action = #selector(resultFilterChanged)
-        resultFilterField.delegate = self
-        resultFilterField.isHidden = true
-        resultFilterField.widthAnchor.constraint(greaterThanOrEqualToConstant: 220).isActive = true
-        applyRoundedCorners(resultFilterField)
-        resultFilters.addArrangedSubview(resultFilterButton)
-        resultFilters.addArrangedSubview(resultFilterField)
+        filterBar.onChange = { [weak self] in self?.reloadResults() }
+        let resultFilters = filterBar.view
         detailStack.orientation = .vertical
         detailStack.alignment = .leading
         detailStack.spacing = 6
@@ -1010,7 +992,7 @@ final class PgQueryApp: NSObject, NSApplicationDelegate, NSTextViewDelegate, NST
         let sql = source.substring(with: range)
         guard !sql.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
         queryView.hideCompletions()
-        clearResults()
+        resetResults()
         resultNote.stringValue = "Executando…"
         resultNote.toolTip = nil
         lastExecutedSQL = sql
@@ -1048,7 +1030,15 @@ final class PgQueryApp: NSObject, NSApplicationDelegate, NSTextViewDelegate, NST
         queryView.markError(at: lastExecutedOffset + offset)
     }
 
+    /// "Limpar" button / ⌘K: also drops the filters.
     @objc private func clearResults() {
+        resetResults()
+        filterBar.removeAll()
+        reloadResults()
+    }
+
+    /// Clears the grid before a new query; filters stay so a re-run keeps them.
+    private func resetResults() {
         resultHeaders = []
         resultRows = []
         resultTypes = []
@@ -1056,11 +1046,7 @@ final class PgQueryApp: NSObject, NSApplicationDelegate, NSTextViewDelegate, NST
         navigationStack.removeAll()
         openDetailsOnNextResult = false
         configureResultColumns()
-        resultsTableView.reloadData()
-        activeResultFilterColumn = nil
-        resultFilterField.stringValue = ""
-        resultFilterField.isHidden = true
-        resultFilterButton.title = "Filtrar"
+        reloadResults()
         resultSortColumn = nil
         closeRowDetails()
         resultNote.stringValue = ""
@@ -1139,18 +1125,20 @@ final class PgQueryApp: NSObject, NSApplicationDelegate, NSTextViewDelegate, NST
         table.hasPrefix("public.") ? String(table.dropFirst("public.".count)) : table
     }
 
+    /// Visible rows after filters and sorting; cached because the grid asks
+    /// for it once per cell. Invalidated by `reloadResults()`.
+    private var cachedResultIndexes: [Int]?
+
     private var filteredResultIndexes: [Int] {
-        var indexes = Array(resultRows.indices)
-        if let column = activeResultFilterColumn {
-            let needle = resultFilterField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-            if !needle.isEmpty {
-                let type = column < resultTypes.count ? resultTypes[column] : nil
-                indexes = indexes.filter {
-                    guard $0 < resultRows.count, column < resultRows[$0].count else { return false }
-                    let raw = resultRows[$0][column]
-                    return raw.localizedCaseInsensitiveContains(needle) || valueFormatter.display(raw, type: type).localizedCaseInsensitiveContains(needle)
-                }
-            }
+        if let cachedResultIndexes { return cachedResultIndexes }
+        let indexes = computeResultIndexes()
+        cachedResultIndexes = indexes
+        return indexes
+    }
+
+    private func computeResultIndexes() -> [Int] {
+        var indexes = filterBar.filters.apply(headers: resultHeaders, rows: resultRows) { [valueFormatter, resultTypes] raw, column in
+            valueFormatter.display(raw, type: column < resultTypes.count ? resultTypes[column] : nil)
         }
         if let column = resultSortColumn {
             indexes.sort { left, right in
@@ -1230,39 +1218,14 @@ final class PgQueryApp: NSObject, NSApplicationDelegate, NSTextViewDelegate, NST
             column.sortDescriptorPrototype = NSSortDescriptor(key: "column-\(index)", ascending: true)
             resultsTableView.addTableColumn(column)
         }
-        if activeResultFilterColumn.map({ $0 >= resultHeaders.count }) ?? false {
-            activeResultFilterColumn = nil
-            resultFilterField.isHidden = true
-            resultFilterField.stringValue = ""
-            resultFilterButton.title = "Filtrar"
-        }
-        resultFilterButton.isEnabled = !resultHeaders.isEmpty
+        filterBar.setHeaders(resultHeaders)
         resultSortColumn = nil
     }
 
-    @objc private func resultFilterChanged() { resultsTableView.reloadData() }
-
-    @objc private func chooseResultFilterColumn() {
-        guard !resultHeaders.isEmpty else { return }
-        let menu = NSMenu()
-        for (index, header) in resultHeaders.enumerated() {
-            let item = NSMenuItem(title: header, action: #selector(selectResultFilterColumn(_:)), keyEquivalent: "")
-            item.target = self
-            item.representedObject = index
-            if activeResultFilterColumn == index { item.state = .on }
-            menu.addItem(item)
-        }
-        menu.popUp(positioning: nil, at: NSPoint(x: 0, y: resultFilterButton.bounds.height), in: resultFilterButton)
-    }
-
-    @objc private func selectResultFilterColumn(_ sender: NSMenuItem) {
-        guard let index = sender.representedObject as? Int, index < resultHeaders.count else { return }
-        activeResultFilterColumn = index
-        resultFilterButton.title = "Filtrar · \(resultHeaders[index])"
-        resultFilterField.placeholderString = "Filtrar por \(resultHeaders[index])…"
-        resultFilterField.isHidden = false
+    private func reloadResults() {
+        cachedResultIndexes = nil
         resultsTableView.reloadData()
-        window.makeFirstResponder(resultFilterField)
+        filterBar.updateSummary(visible: filteredResultIndexes.count, total: resultRows.count)
     }
 
     private func flattenedCellText(_ value: String) -> String {
@@ -1272,18 +1235,12 @@ final class PgQueryApp: NSObject, NSApplicationDelegate, NSTextViewDelegate, NST
             .replacingOccurrences(of: "\u{2029}", with: " ")
     }
 
-    func controlTextDidChange(_ notification: Notification) {
-        guard let field = notification.object as? NSTextField,
-              field.identifier?.rawValue == "result-filter-input" else { return }
-        resultsTableView.reloadData()
-    }
-
     func tableView(_ tableView: NSTableView, sortDescriptorsDidChange oldDescriptors: [NSSortDescriptor]) {
         guard tableView === resultsTableView, let descriptor = tableView.sortDescriptors.first,
               let raw = descriptor.key, let index = Int(raw.replacingOccurrences(of: "column-", with: "")) else { return }
         resultSortColumn = index
         resultSortAscending = descriptor.ascending
-        resultsTableView.reloadData()
+        reloadResults()
     }
 
     func tableViewSelectionDidChange(_ notification: Notification) {
@@ -1406,7 +1363,7 @@ final class PgQueryApp: NSObject, NSApplicationDelegate, NSTextViewDelegate, NST
         resultRows = snapshot.rows
         resultNote.stringValue = snapshot.note
         configureResultColumns()
-        resultsTableView.reloadData()
+        reloadResults()
     }
 
     @objc private func closeRowDetails(_ sender: Any? = nil) {
@@ -1482,7 +1439,7 @@ final class PgQueryApp: NSObject, NSApplicationDelegate, NSTextViewDelegate, NST
             resultHeaders = []
             resultRows = []
             configureResultColumns()
-            resultsTableView.reloadData()
+            reloadResults()
             resultNote.stringValue = event["text"] as? String ?? "Falha na conexão"
             setConnected(false)
         case "query_error" where openDetailsOnNextResult:
@@ -1498,7 +1455,7 @@ final class PgQueryApp: NSObject, NSApplicationDelegate, NSTextViewDelegate, NST
             resultHeaders = []
             resultRows = []
             configureResultColumns()
-            resultsTableView.reloadData()
+            reloadResults()
             let message = event["text"] as? String ?? "Falha na consulta"
             resultNote.stringValue = message.components(separatedBy: .newlines).first ?? message
             resultNote.toolTip = message
