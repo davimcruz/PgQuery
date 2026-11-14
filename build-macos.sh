@@ -18,7 +18,7 @@ swiftc -parse-as-library \
   -import-objc-header macos/PgQueryCore.h \
   macos/PgQuery.swift macos/SQLLexer.swift macos/SQLVocabulary.swift macos/SQLCompletion.swift \
   macos/SQLHighlighter.swift macos/LineNumberRuler.swift macos/CompletionPopup.swift macos/SQLTextView.swift \
-  macos/KeyCap.swift macos/ValueFormatter.swift \
+  macos/KeyCap.swift macos/ValueFormatter.swift macos/ResultFilter.swift macos/ResultFilterBar.swift \
   target/release/libpgquery_core.a \
   -o "$APP/Contents/MacOS/PgQuery" \
   -framework AppKit -framework SystemConfiguration \
