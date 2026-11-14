@@ -49,3 +49,7 @@ O script prepara os secrets de Actions para a chave privada EdDSA do Sparkle e p
 ## Armazenamento local da conexão
 
 A URL de conexão fica em `~/Library/Application Support/PgQuery/connection.txt`, com permissões restritas à conta do usuário. O arquivo não é criptografado e pode conter a senha do banco; proteja sua conta do macOS e apague esse arquivo para remover a conexão salva.
+
+## Licença
+
+[MIT](LICENSE)
