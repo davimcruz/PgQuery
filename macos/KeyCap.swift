@@ -46,8 +46,8 @@ enum KeyCap {
 
 extension NSButton {
     /// Shows the shortcut as key caps after the title.
-    func showShortcut(_ keys: String...) {
-        image = KeyCap.image(keys, onAccent: keyEquivalent == "\r")
+    func showShortcut(_ keys: String..., onAccent: Bool? = nil) {
+        image = KeyCap.image(keys, onAccent: onAccent ?? (keyEquivalent == "\r"))
         imagePosition = .imageTrailing
         imageHugsTitle = true
         let hint = keys.joined()
