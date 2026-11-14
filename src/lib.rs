@@ -247,7 +247,7 @@ fn query_rows(runtime: &tokio::runtime::Runtime, client: &tokio_postgres::Client
             }
         }
         let note = if total > rows.len() { format!("Mostrando {} de {total} linhas (limite de memória atingido).", rows.len()) }
-            else if !command.is_empty() { command } else { format!("{} linha(s)", rows.len()) };
+            else if headers.is_empty() && !command.is_empty() { command } else { format!("{} linha(s)", rows.len()) };
         Ok((headers, rows, note))
     })
 }
