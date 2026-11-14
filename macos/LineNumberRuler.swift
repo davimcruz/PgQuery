@@ -11,15 +11,20 @@ final class LineNumberRulerView: NSRulerView {
         super.init(scrollView: scrollView, orientation: .verticalRuler)
         clientView = textView
         ruleThickness = 36
-        NotificationCenter.default.addObserver(self, selector: #selector(contentChanged), name: NSView.boundsDidChangeNotification, object: scrollView.contentView)
-        NotificationCenter.default.addObserver(self, selector: #selector(contentChanged), name: NSText.didChangeNotification, object: textView)
-        NotificationCenter.default.addObserver(self, selector: #selector(contentChanged), name: NSTextView.didChangeSelectionNotification, object: textView)
+        NotificationCenter.default.addObserver(self, selector: #selector(viewChanged), name: NSView.boundsDidChangeNotification, object: scrollView.contentView)
+        NotificationCenter.default.addObserver(self, selector: #selector(textChanged), name: NSText.didChangeNotification, object: textView)
+        NotificationCenter.default.addObserver(self, selector: #selector(viewChanged), name: NSTextView.didChangeSelectionNotification, object: textView)
         scrollView.contentView.postsBoundsChangedNotifications = true
     }
 
     required init(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
-    @objc private func contentChanged(_ notification: Notification) {
+    /// Scrolling and caret moves only need a redraw.
+    @objc private func viewChanged(_ notification: Notification) { needsDisplay = true }
+
+    /// Only edits can change the number of digits, so the whole text is
+    /// scanned here and not on every scroll tick.
+    @objc private func textChanged(_ notification: Notification) {
         updateThickness()
         needsDisplay = true
     }
