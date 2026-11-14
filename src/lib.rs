@@ -154,12 +154,18 @@ fn worker(requests: Receiver<Request>, events: Sender<Event>) {
                 let result = runtime.block_on(async {
                     let _ = rustls::crypto::ring::default_provider().install_default();
                     let provider = Arc::new(rustls::crypto::ring::default_provider());
-                    let config: tokio_postgres::Config = connection_string.parse()?;
-                    let encryption_only = matches!(config.get_ssl_mode(), tokio_postgres::config::SslMode::Require);
+                    // tokio-postgres only knows disable/prefer/require. Treat
+                    // verify-ca and verify-full as `require` plus validation of
+                    // the server certificate (rustls always checks the host
+                    // name, so both behave like verify-full).
+                    let verify = connection_string.contains("sslmode=verify-full") || connection_string.contains("sslmode=verify-ca");
+                    let normalized = connection_string.replace("sslmode=verify-full", "sslmode=require").replace("sslmode=verify-ca", "sslmode=require");
+                    let config: tokio_postgres::Config = normalized.parse()?;
+                    let encryption_only = matches!(config.get_ssl_mode(), tokio_postgres::config::SslMode::Require) && !verify;
                     // Root certificates are only needed when the server
-                    // certificate is validated (sslmode=prefer); `require`
-                    // skips validation and `disable` never uses TLS.
-                    let validates = matches!(config.get_ssl_mode(), tokio_postgres::config::SslMode::Prefer);
+                    // certificate is validated; plain `require` skips
+                    // validation and `disable` never uses TLS.
+                    let validates = verify || matches!(config.get_ssl_mode(), tokio_postgres::config::SslMode::Prefer);
                     let mut roots = rustls::RootCertStore { roots: if validates { webpki_roots::TLS_SERVER_ROOTS.to_vec() } else { Vec::new() } };
                     if validates {
                         let native_roots = rustls_native_certs::load_native_certs();
