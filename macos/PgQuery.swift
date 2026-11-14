@@ -115,6 +115,7 @@ final class PgQueryApp: NSObject, NSApplicationDelegate, NSTextViewDelegate, NST
     private var detailScrollView: NSScrollView!
     private var sqlScrollView: NSScrollView!
     private var sqlRunButton: NSButton!
+    private var sqlRunStatementButton: NSButton!
     private var copyResultsButton: NSButton!
     private var clearResultsButton: NSButton!
     private var hasExecutedQuery = false
@@ -234,6 +235,7 @@ final class PgQueryApp: NSObject, NSApplicationDelegate, NSTextViewDelegate, NST
         let connectButton = PointerButton(title: "Conectar", target: self, action: #selector(connect))
         connectButton.bezelStyle = .rounded
         connectButton.keyEquivalent = "\r"
+        connectButton.showShortcut("↩")
         let parameterConnectButton = PointerButton(title: "Por parâmetros…", target: self, action: #selector(openSettingsFromMenu(_:)))
         parameterConnectButton.bezelStyle = .rounded
         connectionBar.addArrangedSubview(connectionField)
@@ -249,8 +251,7 @@ final class PgQueryApp: NSObject, NSApplicationDelegate, NSTextViewDelegate, NST
         connectionSummaryField.textColor = .systemGreen
         let settingsButton = PointerButton(title: "Configurações", target: self, action: #selector(openSettingsFromMenu(_:)))
         settingsButton.bezelStyle = .rounded
-        settingsButton.image = NSImage(systemSymbolName: "slider.horizontal.3", accessibilityDescription: "Configurações")
-        settingsButton.imagePosition = .imageLeading
+        settingsButton.showShortcut("⌘", ",")
         applyRoundedCorners(settingsButton)
         connectedBar.addArrangedSubview(connectionSummaryField)
         connectedBar.addArrangedSubview(settingsButton)
@@ -397,20 +398,28 @@ final class PgQueryApp: NSObject, NSApplicationDelegate, NSTextViewDelegate, NST
         let runButton = PointerButton(title: "Executar SQL", target: self, action: #selector(runQuery))
         sqlRunButton = runButton
         runButton.bezelStyle = .rounded
-        runButton.toolTip = "Executa a seleção ou todo o editor (⌘R). ⌘↩ executa só a instrução sob o cursor."
+        runButton.toolTip = "Executa a seleção ou todo o editor"
+        runButton.showShortcut("⌘", "R")
+        let runStatementButton = PointerButton(title: "Executar instrução", target: self, action: #selector(runCurrentStatement))
+        runStatementButton.bezelStyle = .rounded
+        runStatementButton.toolTip = "Executa a seleção ou só a instrução sob o cursor"
+        runStatementButton.showShortcut("⌘", "↩")
+        sqlRunStatementButton = runStatementButton
         let clearButton = PointerButton(title: "Limpar", target: self, action: #selector(clearResults))
         clearResultsButton = clearButton
         clearButton.bezelStyle = .rounded
+        clearButton.showShortcut("⌘", "K")
         let copyButton = PointerButton(title: "Copiar resultado", target: self, action: #selector(copyResults))
         copyResultsButton = copyButton
         copyButton.bezelStyle = .rounded
+        copyButton.showShortcut("⇧", "⌘", "C")
         clearButton.isHidden = true
         copyButton.isHidden = true
-        [runButton, clearButton, copyButton].forEach(applyRoundedCorners)
+        [runButton, runStatementButton, clearButton, copyButton].forEach(applyRoundedCorners)
         resultNote.textColor = .secondaryLabelColor
         resultNote.font = .systemFont(ofSize: 11)
         resultNote.lineBreakMode = .byTruncatingTail
-        let controls = NSStackView(views: [runButton, resultNote, copyButton, clearButton])
+        let controls = NSStackView(views: [runButton, runStatementButton, resultNote, copyButton, clearButton])
         controls.orientation = .horizontal
         controls.alignment = .centerY
         controls.spacing = 10
@@ -606,6 +615,8 @@ final class PgQueryApp: NSObject, NSApplicationDelegate, NSTextViewDelegate, NST
         }
         _ = add("Executar instrução atual", #selector(runCurrentStatement), "\r", target: self)
         _ = add("Executar tudo (ou seleção)", #selector(runQuery), "r", target: self)
+        _ = add("Copiar resultado", #selector(copyResults), "c", [.command, .shift], target: self)
+        _ = add("Limpar resultado", #selector(clearResults), "k", target: self)
         sqlMenu.addItem(.separator())
         // ⎋ / ⌃Space are handled by the editor itself: a menu shortcut on ⎋
         // would steal the key that closes the suggestion list.
@@ -647,6 +658,7 @@ final class PgQueryApp: NSObject, NSApplicationDelegate, NSTextViewDelegate, NST
         sqlEditorVisible.toggle()
         sqlScrollView.isHidden = !sqlEditorVisible
         sqlRunButton.isHidden = !sqlEditorVisible
+        sqlRunStatementButton.isHidden = !sqlEditorVisible
         sender.title = sqlEditorVisible ? "Ocultar editor SQL" : "Mostrar editor SQL"
         sqlMinimumHeightConstraint.isActive = sqlEditorVisible
         sqlResultsEqualHeightConstraint.isActive = sqlEditorVisible
@@ -737,9 +749,11 @@ final class PgQueryApp: NSObject, NSApplicationDelegate, NSTextViewDelegate, NST
         let cancelButton = PointerButton(title: "Cancelar", target: self, action: #selector(closeSettings(_:)))
         cancelButton.bezelStyle = .rounded
         cancelButton.keyEquivalent = "\u{1b}"
+        cancelButton.showShortcut("⎋")
         let saveButton = PointerButton(title: "Salvar e reconectar", target: self, action: #selector(saveConnectionSettings(_:)))
         saveButton.bezelStyle = .rounded
         saveButton.keyEquivalent = "\r"
+        saveButton.showShortcut("↩")
         let buttons = NSStackView(views: [cancelButton, saveButton])
         [secureURLField as NSView, visibleURLField, hostField, portField, databaseField, usernameField, passwordField, sslModeField, cancelButton, saveButton].forEach(applyRoundedCorners)
         buttons.orientation = .horizontal
