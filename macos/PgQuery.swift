@@ -363,12 +363,13 @@ final class PgQueryApp: NSObject, NSApplicationDelegate, NSTextViewDelegate, NST
         tableListView.dataSource = self
         tableListView.target = self
         tableListView.action = #selector(tableSelected)
-        let tableScroll = NSScrollView()
+        let tableScroll = HoverScrollView()
         tableScroll.hasVerticalScroller = true
         tableScroll.hasHorizontalScroller = false
         tableScroll.borderType = .bezelBorder
         applyRoundedBorder(to: tableScroll)
         applyRoundedCorners(filterField)
+        tableScroll.enableHoverScrollers(horizontal: false)
         tableScroll.documentView = tableListView
         tableScroll.translatesAutoresizingMaskIntoConstraints = false
         let sidebar = NSStackView(views: [sidebarTitle, filterField, tableScroll])
@@ -414,11 +415,12 @@ final class PgQueryApp: NSObject, NSApplicationDelegate, NSTextViewDelegate, NST
         copyJSONItem.target = self
         resultsTableView.menu = rowMenu
         resultsTableView.translatesAutoresizingMaskIntoConstraints = false
-        let resultScroll = NSScrollView()
+        let resultScroll = HoverScrollView()
         resultScroll.hasVerticalScroller = true
         resultScroll.hasHorizontalScroller = true
         resultScroll.borderType = .bezelBorder
         applyRoundedBorder(to: resultScroll)
+        resultScroll.enableHoverScrollers()
         resultScroll.documentView = resultsTableView
         resultScroll.translatesAutoresizingMaskIntoConstraints = false
         filterBar.onChange = { [weak self] in self?.reloadResults() }
