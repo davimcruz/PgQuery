@@ -12,6 +12,16 @@ Cliente desktop leve para PostgreSQL no macOS. A interface usa AppKit nativo; co
 4. Escreva SQL e clique em **Executar SQL**. `⌘R` também executa.
 5. **Copiar resultado** e **Limpar** aparecem após uma consulta bem-sucedida.
 
+## Editor SQL
+
+- **Autocomplete por contexto**: tabelas depois de `FROM`/`JOIN`/`UPDATE`/`INTO`, colunas de `alias.`/`tabela.`, tabelas de `schema.`, e identificadores ao abrir aspas duplas (`"`). Não abre sozinho enquanto você digita palavras-chave.
+- `⎋` ou `⌃Espaço` abre as sugestões manualmente; `↑ ↓` navegam, `↩`/`⇥` inserem, `⎋` fecha. Em **SQL → Sugerir colunas enquanto digita** dá para ligar sugestões automáticas de colunas.
+- Entende aliases, CTEs (`WITH`) e subconsultas; colunas ambíguas entre tabelas são inseridas qualificadas (`u.id`). Identificadores só ganham aspas quando o PostgreSQL exige.
+- `⌘↩` executa a instrução sob o cursor (ou a seleção); `⌘R` executa a seleção ou tudo. A posição de erros do PostgreSQL é sublinhada no editor.
+- Fecha parênteses e aspas automaticamente, indenta ao pular linha, `⇥`/`⇧⇥` indentam blocos, `⌘/` comenta linhas, `⌘D` duplica, `⌘F` busca, `⌘+`/`⌘-` mudam a fonte.
+
+Testes do editor (sem banco): `scripts/test-editor.sh`.
+
 O ícone vetorial original está em `macos/AppIcon.svg`; `macos/make-icon.swift` gera os tamanhos nativos do macOS.
 
 ## Compilar
