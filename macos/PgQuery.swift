@@ -429,11 +429,11 @@ final class PgQueryApp: NSObject, NSApplicationDelegate, NSTextViewDelegate, NST
         let runButton = PointerButton(title: "Executar SQL", target: self, action: #selector(runQuery))
         sqlRunButton = runButton
         runButton.bezelStyle = .rounded
-        runButton.toolTip = "Executa a seleção ou todo o editor"
+        runButton.toolTip = "Executar SQL (⌘R)\nRoda todo o conteúdo do editor, com todas as instruções.\nSe houver texto selecionado, roda só a seleção."
         runButton.showShortcut("⌘", "R")
         let runStatementButton = PointerButton(title: "Executar instrução", target: self, action: #selector(runCurrentStatement))
         runStatementButton.bezelStyle = .rounded
-        runStatementButton.toolTip = "Executa a seleção ou só a instrução sob o cursor"
+        runStatementButton.toolTip = "Executar instrução (⌘↩)\nRoda só a instrução onde está o cursor; as instruções são separadas por ponto e vírgula (;).\nÚtil para manter várias consultas no editor e rodar uma de cada vez.\nSe houver texto selecionado, roda só a seleção."
         runStatementButton.showShortcut("⌘", "↩")
         sqlRunStatementButton = runStatementButton
         let clearButton = PointerButton(title: "Limpar", target: self, action: #selector(clearResults))
