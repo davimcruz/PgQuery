@@ -97,6 +97,16 @@ final class PointerSegmentedControl: NSSegmentedControl {
     override func mouseExited(with event: NSEvent) { NSCursor.arrow.set() }
 }
 
+/// A result set kept so foreign-key navigation can go back to it.
+struct ResultSnapshot {
+    var headers: [String]
+    var types: [String]
+    var foreignKeys: [[String]]
+    var rows: [[String]]
+    var note: String
+    var selectedRow: Int?
+}
+
 @MainActor
 @main
 final class PgQueryApp: NSObject, NSApplicationDelegate, NSTextViewDelegate, NSTextFieldDelegate, NSSearchFieldDelegate, NSTableViewDataSource, NSTableViewDelegate {
@@ -138,6 +148,15 @@ final class PgQueryApp: NSObject, NSApplicationDelegate, NSTextViewDelegate, NST
     private var suggestWhileTypingItem: NSMenuItem?
     private var resultHeaders: [String] = []
     private var resultRows: [[String]] = []
+    /// PostgreSQL type name per result column (empty when unknown).
+    private var resultTypes: [String] = []
+    /// `[schema, table, column]` a result column references, or `[]`.
+    private var resultForeignKeys: [[String]] = []
+    private let valueFormatter = ValueFormatter()
+    /// Results to return to with "Voltar" after following foreign keys.
+    private var navigationStack: [ResultSnapshot] = []
+    private var openDetailsOnNextResult = false
+    private let detailBackButton = PointerButton(title: "Voltar", target: nil, action: nil)
     private var resultSortColumn: Int?
     private var resultSortAscending = true
     private var connectionURL = ""
@@ -382,7 +401,19 @@ final class PgQueryApp: NSObject, NSApplicationDelegate, NSTextViewDelegate, NST
         let closeDrawerButton = PointerButton(image: NSImage(systemSymbolName: "xmark", accessibilityDescription: "Fechar detalhes")!, target: self, action: #selector(closeRowDetails(_:)))
         closeDrawerButton.isBordered = false
         closeDrawerButton.imagePosition = .imageOnly
-        let drawerHeader = NSStackView(views: [drawerTitle, closeDrawerButton])
+        detailBackButton.target = self
+        detailBackButton.action = #selector(navigateBack(_:))
+        detailBackButton.bezelStyle = .rounded
+        detailBackButton.controlSize = .small
+        detailBackButton.image = NSImage(systemSymbolName: "chevron.left", accessibilityDescription: "Voltar")
+        detailBackButton.imagePosition = .imageLeading
+        detailBackButton.toolTip = "Voltar para o resultado anterior"
+        detailBackButton.isHidden = true
+        let drawerLeading = NSStackView(views: [detailBackButton, drawerTitle])
+        drawerLeading.orientation = .horizontal
+        drawerLeading.alignment = .centerY
+        drawerLeading.spacing = 8
+        let drawerHeader = NSStackView(views: [drawerLeading, closeDrawerButton])
         drawerHeader.orientation = .horizontal
         drawerHeader.alignment = .centerY
         drawerHeader.distribution = .equalSpacing
@@ -956,6 +987,10 @@ final class PgQueryApp: NSObject, NSApplicationDelegate, NSTextViewDelegate, NST
     @objc private func clearResults() {
         resultHeaders = []
         resultRows = []
+        resultTypes = []
+        resultForeignKeys = []
+        navigationStack.removeAll()
+        openDetailsOnNextResult = false
         configureResultColumns()
         resultsTableView.reloadData()
         activeResultFilterColumn = nil
@@ -1045,7 +1080,12 @@ final class PgQueryApp: NSObject, NSApplicationDelegate, NSTextViewDelegate, NST
         if let column = activeResultFilterColumn {
             let needle = resultFilterField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
             if !needle.isEmpty {
-                indexes = indexes.filter { $0 < resultRows.count && column < resultRows[$0].count && resultRows[$0][column].localizedCaseInsensitiveContains(needle) }
+                let type = column < resultTypes.count ? resultTypes[column] : nil
+                indexes = indexes.filter {
+                    guard $0 < resultRows.count, column < resultRows[$0].count else { return false }
+                    let raw = resultRows[$0][column]
+                    return raw.localizedCaseInsensitiveContains(needle) || valueFormatter.display(raw, type: type).localizedCaseInsensitiveContains(needle)
+                }
             }
         }
         if let column = resultSortColumn {
@@ -1090,8 +1130,14 @@ final class PgQueryApp: NSObject, NSApplicationDelegate, NSTextViewDelegate, NST
             guard row < indexes.count, let tableColumn,
                   let columnIndex = tableView.tableColumns.firstIndex(of: tableColumn),
                   columnIndex < resultRows[indexes[row]].count else { return cell }
+            let raw = resultRows[indexes[row]][columnIndex]
+            let type = columnIndex < resultTypes.count ? resultTypes[columnIndex] : nil
             cell.textField?.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
-            cell.textField?.stringValue = flattenedCellText(resultRows[indexes[row]][columnIndex])
+            cell.textField?.stringValue = flattenedCellText(valueFormatter.display(raw, type: type))
+            // Cells are reused, so always reset the color.
+            cell.textField?.textColor = raw == "NULL" ? .tertiaryLabelColor
+                : ValueFormatter.kind(of: type) == .boolean ? (raw == "t" ? .systemGreen : .secondaryLabelColor)
+                : .labelColor
         }
         return cell
     }
@@ -1174,23 +1220,67 @@ final class PgQueryApp: NSObject, NSApplicationDelegate, NSTextViewDelegate, NST
     private func showRowDetails(at row: Int) {
         guard row < resultRows.count else { return }
         for view in detailStack.arrangedSubviews { detailStack.removeArrangedSubview(view); view.removeFromSuperview() }
+        detailBackButton.isHidden = navigationStack.isEmpty
         for (index, header) in resultHeaders.enumerated() {
+            let raw = index < resultRows[row].count ? resultRows[row][index] : "NULL"
+            let type = index < resultTypes.count ? resultTypes[index] : nil
+            let foreignKey = index < resultForeignKeys.count ? resultForeignKeys[index] : []
+
             let name = NSTextField(labelWithString: header)
             name.font = .systemFont(ofSize: 11, weight: .semibold)
             name.textColor = .secondaryLabelColor
-            let value = NSTextField(wrappingLabelWithString: index < resultRows[row].count ? resultRows[row][index] : "NULL")
+            let nameRow = NSStackView(views: [name])
+            nameRow.orientation = .horizontal
+            nameRow.spacing = 6
+            if let type, !type.isEmpty {
+                let typeLabel = NSTextField(labelWithString: type)
+                typeLabel.font = .monospacedSystemFont(ofSize: 10, weight: .regular)
+                typeLabel.textColor = .tertiaryLabelColor
+                nameRow.addArrangedSubview(typeLabel)
+            }
+
+            let formatted = valueFormatter.detail(raw, type: type)
+            let value = NSTextField(wrappingLabelWithString: formatted.value)
             value.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
+            value.textColor = raw == "NULL" ? .tertiaryLabelColor : .labelColor
             value.maximumNumberOfLines = 0
             value.lineBreakMode = .byWordWrapping
             value.isSelectable = true
-            value.preferredMaxLayoutWidth = 300
-            detailStack.addArrangedSubview(name)
-            detailStack.addArrangedSubview(value)
+            value.preferredMaxLayoutWidth = 270
+            value.setContentHuggingPriority(.defaultLow, for: .horizontal)
+            let valueRow = NSStackView(views: [value])
+            valueRow.orientation = .horizontal
+            valueRow.alignment = .top
+            valueRow.spacing = 6
+            valueRow.translatesAutoresizingMaskIntoConstraints = false
+            if foreignKey.count == 3, raw != "NULL" {
+                // Jump to the referenced row in the other table.
+                let jump = PointerButton(image: NSImage(systemSymbolName: "arrow.right.circle.fill", accessibilityDescription: "Abrir linha referenciada")!, target: self, action: #selector(followForeignKey(_:)))
+                jump.isBordered = false
+                jump.imagePosition = .imageOnly
+                jump.contentTintColor = .controlAccentColor
+                jump.toolTip = "Abrir \(displayName(for: foreignKey[0] + "." + foreignKey[1])) onde \(foreignKey[2]) = \(raw)"
+                jump.identifier = NSUserInterfaceItemIdentifier("fk-\(index)")
+                jump.tag = row
+                jump.setContentHuggingPriority(.required, for: .horizontal)
+                valueRow.addArrangedSubview(jump)
+                name.stringValue = header + "  →  " + displayName(for: foreignKey[0] + "." + foreignKey[1])
+            }
+            detailStack.addArrangedSubview(nameRow)
+            detailStack.addArrangedSubview(valueRow)
+            valueRow.widthAnchor.constraint(equalTo: detailStack.widthAnchor).isActive = true
+            if let original = formatted.original {
+                let originalLabel = NSTextField(labelWithString: original)
+                originalLabel.font = .monospacedSystemFont(ofSize: 10, weight: .regular)
+                originalLabel.textColor = .tertiaryLabelColor
+                originalLabel.isSelectable = true
+                detailStack.addArrangedSubview(originalLabel)
+                detailStack.setCustomSpacing(4, after: valueRow)
+            }
             let separator = NSBox()
             separator.boxType = .separator
             separator.translatesAutoresizingMaskIntoConstraints = false
             detailStack.addArrangedSubview(separator)
-            value.widthAnchor.constraint(equalTo: detailStack.widthAnchor).isActive = true
             separator.widthAnchor.constraint(equalTo: detailStack.widthAnchor).isActive = true
             detailStack.setCustomSpacing(12, after: separator)
         }
@@ -1201,6 +1291,45 @@ final class PgQueryApp: NSObject, NSApplicationDelegate, NSTextViewDelegate, NST
         detailPanel.layoutSubtreeIfNeeded()
         detailScrollView.contentView.scroll(to: .zero)
         detailScrollView.reflectScrolledClipView(detailScrollView.contentView)
+    }
+
+    @objc private func followForeignKey(_ sender: NSButton) {
+        guard let raw = sender.identifier?.rawValue, raw.hasPrefix("fk-"), let column = Int(raw.dropFirst(3)),
+              column < resultForeignKeys.count, resultForeignKeys[column].count == 3,
+              sender.tag < resultRows.count, column < resultRows[sender.tag].count else { return }
+        let target = resultForeignKeys[column]
+        let value = resultRows[sender.tag][column]
+        navigationStack.append(ResultSnapshot(headers: resultHeaders, types: resultTypes, foreignKeys: resultForeignKeys,
+                                              rows: resultRows, note: resultNote.stringValue, selectedRow: sender.tag))
+        let quote = { (identifier: String) in "\"" + identifier.replacingOccurrences(of: "\"", with: "\"\"") + "\"" }
+        let literal = "'" + value.replacingOccurrences(of: "'", with: "''") + "'"
+        let sql = "SELECT * FROM \(quote(target[0])).\(quote(target[1])) WHERE \(quote(target[2])) = \(literal) LIMIT 500"
+        openDetailsOnNextResult = true
+        lastExecutedSQL = ""  // errors here do not point into the editor
+        resultNote.stringValue = "Abrindo \(displayName(for: target[0] + "." + target[1])) onde \(target[2]) = \(value)…"
+        resultNote.toolTip = sql
+        sql.withCString { pg_query($0) }
+    }
+
+    @objc private func navigateBack(_ sender: Any?) {
+        guard let snapshot = navigationStack.popLast() else { return }
+        openDetailsOnNextResult = false
+        apply(snapshot)
+        if let row = snapshot.selectedRow, let visible = filteredResultIndexes.firstIndex(of: row) {
+            resultsTableView.selectRowIndexes(IndexSet(integer: visible), byExtendingSelection: false)
+            resultsTableView.scrollRowToVisible(visible)
+            showRowDetails(at: row)
+        }
+    }
+
+    private func apply(_ snapshot: ResultSnapshot) {
+        resultHeaders = snapshot.headers
+        resultTypes = snapshot.types
+        resultForeignKeys = snapshot.foreignKeys
+        resultRows = snapshot.rows
+        resultNote.stringValue = snapshot.note
+        configureResultColumns()
+        resultsTableView.reloadData()
     }
 
     @objc private func closeRowDetails(_ sender: Any? = nil) {
@@ -1251,11 +1380,18 @@ final class PgQueryApp: NSObject, NSApplicationDelegate, NSTextViewDelegate, NST
             closeRowDetails()
             hasExecutedQuery = kind == "results"
             updateResultActionVisibility()
-            resultHeaders = event["headers"] as? [String] ?? []
-            resultRows = event["rows"] as? [[String]] ?? []
-            resultNote.stringValue = event["note"] as? String ?? ""
-            configureResultColumns()
-            resultsTableView.reloadData()
+            apply(ResultSnapshot(headers: event["headers"] as? [String] ?? [], types: event["types"] as? [String] ?? [],
+                                 foreignKeys: event["foreign_keys"] as? [[String]] ?? [], rows: event["rows"] as? [[String]] ?? [],
+                                 note: event["note"] as? String ?? "", selectedRow: nil))
+            if openDetailsOnNextResult {
+                openDetailsOnNextResult = false
+                if resultRows.isEmpty {
+                    resultNote.stringValue = "Linha referenciada não encontrada"
+                } else {
+                    resultsTableView.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
+                    showRowDetails(at: filteredResultIndexes.first ?? 0)
+                }
+            }
         case "error":
             hasExecutedQuery = false
             updateResultActionVisibility()
@@ -1265,6 +1401,13 @@ final class PgQueryApp: NSObject, NSApplicationDelegate, NSTextViewDelegate, NST
             resultsTableView.reloadData()
             resultNote.stringValue = event["text"] as? String ?? "Falha na conexão"
             setConnected(false)
+        case "query_error" where openDetailsOnNextResult:
+            // Following a foreign key failed: stay on the current results.
+            openDetailsOnNextResult = false
+            navigationStack.removeLast()
+            let message = event["text"] as? String ?? "Falha na consulta"
+            resultNote.stringValue = "Não foi possível abrir a linha referenciada: " + (message.components(separatedBy: .newlines).first ?? message)
+            resultNote.toolTip = message
         case "query_error":
             hasExecutedQuery = false
             updateResultActionVisibility()
