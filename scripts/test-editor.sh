@@ -4,6 +4,6 @@ set -eu
 cd "$(dirname "$0")/.."
 mkdir -p target
 swiftc -O -module-cache-path target/swift-module-cache \
-  macos/SQLLexer.swift macos/SQLVocabulary.swift macos/SQLCompletion.swift macos/ValueFormatter.swift macos/Tests/main.swift \
+  macos/SQLLexer.swift macos/SQLVocabulary.swift macos/SQLCompletion.swift macos/ValueFormatter.swift macos/ResultFilter.swift macos/Tests/main.swift \
   -o target/editor-tests
 target/editor-tests

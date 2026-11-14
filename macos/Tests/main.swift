@@ -163,5 +163,27 @@ do {
     check(detail.original == "2026-11-14 03:40:24.5+00" && detail.value.contains("2026"), "detail keeps original: \(detail)")
 }
 
+// MARK: Result filters
+do {
+    let headers = ["id", "email", "active", "score"]
+    let rows = [["1", "a@x.com", "t", "10"], ["2", "b@y.com", "f", "9"], ["3", "NULL", "t", "100"]]
+    func run(_ filters: [ResultFilter]) -> [Int] {
+        filters.apply(headers: headers, rows: rows) { raw, column in column == 2 ? (raw == "t" ? "true" : "false") : raw }
+    }
+    check(run([]) == [0, 1, 2], "no filters")
+    check(run([ResultFilter(column: "email", op: .contains, value: "X.COM")]) == [0], "contains is case-insensitive")
+    check(run([ResultFilter(column: "active", op: .equals, value: "true")]) == [0, 2], "matches displayed booleans")
+    check(run([ResultFilter(column: "active", op: .equals, value: "t"), ResultFilter(column: "score", op: .greaterThan, value: "9")]) == [0, 2], "composite AND + numeric compare")
+    check(run([ResultFilter(column: "email", op: .isNull)]) == [2], "is null")
+    check(run([ResultFilter(column: "email", op: .isNotNull), ResultFilter(column: "email", op: .notContains, value: "y.com")]) == [0], "not null + not contains")
+    check(run([ResultFilter(column: "email", op: .contains, value: "  ")]) == [0, 1, 2], "empty value is inactive")
+    check(run([ResultFilter(column: "missing", op: .contains, value: "x")]) == [0, 1, 2], "unknown column ignored")
+    check(run([ResultFilter(column: "score", op: .lessThan, value: "50")]) == [0, 1], "less than numeric")
+    let pt = Locale(identifier: "pt_BR")
+    check(RowEstimate.short(950, locale: pt) == "950", "estimate small")
+    check(RowEstimate.short(1_234_567, locale: pt).replacingOccurrences(of: "\u{00A0}", with: " ") == "~1,2 mi", "estimate millions: \(RowEstimate.short(1_234_567, locale: pt))")
+    check(RowEstimate.short(-1) == "?", "estimate unknown")
+}
+
 print(failures == 0 ? "✓ \(passed) checks passed" : "\(failures) failed, \(passed) passed")
 exit(failures == 0 ? 0 : 1)
