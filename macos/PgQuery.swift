@@ -195,6 +195,9 @@ final class PgQueryApp: NSObject, NSApplicationDelegate, NSTextViewDelegate, NST
     private let connectionBar = NSStackView()
     private let connectedBar = NSStackView()
     private var tables: [String] = []
+    /// Approximate row count per `schema.table` (planner statistics).
+    private var tableEstimates: [String: Int64] = [:]
+    private var previewTable: String?
     private var lastExecutedSQL = ""
     private var lastExecutedOffset = 0
     private var saveSQLWorkItem: DispatchWorkItem?
@@ -980,7 +983,9 @@ final class PgQueryApp: NSObject, NSApplicationDelegate, NSTextViewDelegate, NST
         let visible = filteredTables
         let index = tableListView.selectedRow
         guard index >= 0, index < visible.count else { return }
-        clearResults()
+        resetResults()
+        filterBar.removeAll()  // another table: its filters don't apply
+        previewTable = visible[index]
         visible[index].withCString { pg_select_table($0) }
     }
 
@@ -1442,6 +1447,10 @@ final class PgQueryApp: NSObject, NSApplicationDelegate, NSTextViewDelegate, NST
                 setConnected(true)
                 saveConnectionURLToDisk(connectionURL)
             }
+        case "table_stats":
+            let rows = event["items"] as? [[String]] ?? []
+            tableEstimates = Dictionary(rows.compactMap { row in row.count == 2 ? Int64(row[1]).map { (row[0], $0) } : nil }, uniquingKeysWith: { first, _ in first })
+            tableListView.reloadData()
         case "tables":
             tables = event["items"] as? [String] ?? []
             tableListView.reloadData()
@@ -1455,6 +1464,9 @@ final class PgQueryApp: NSObject, NSApplicationDelegate, NSTextViewDelegate, NST
             apply(ResultSnapshot(headers: event["headers"] as? [String] ?? [], types: event["types"] as? [String] ?? [],
                                  foreignKeys: event["foreign_keys"] as? [[String]] ?? [], rows: event["rows"] as? [[String]] ?? [],
                                  note: event["note"] as? String ?? "", selectedRow: nil))
+            if kind == "table_preview", let table = previewTable, let estimate = tableEstimates[table], estimate >= 0 {
+                resultNote.stringValue = "Mostrando \(resultRows.count) · tabela com \(RowEstimate.long(estimate))"
+            }
             if openDetailsOnNextResult {
                 openDetailsOnNextResult = false
                 if resultRows.isEmpty {
