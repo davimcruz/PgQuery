@@ -16,7 +16,9 @@ fi
 swiftc -parse-as-library \
   -module-cache-path target/swift-module-cache \
   -import-objc-header macos/PgQueryCore.h \
-  macos/PgQuery.swift target/release/libpgquery_core.a \
+  macos/PgQuery.swift macos/SQLLexer.swift macos/SQLVocabulary.swift macos/SQLCompletion.swift \
+  macos/SQLHighlighter.swift macos/LineNumberRuler.swift macos/CompletionPopup.swift macos/SQLTextView.swift \
+  target/release/libpgquery_core.a \
   -o "$APP/Contents/MacOS/PgQuery" \
   -framework AppKit -framework SystemConfiguration \
   -F "$(dirname "$sparkle_framework")" -framework Sparkle \
