@@ -490,8 +490,10 @@ final class PgQueryApp: NSObject, NSApplicationDelegate, NSTextViewDelegate, NST
         runButton.showShortcut("⌘", "R")
         let runStatementButton = PointerButton(title: "Executar instrução", target: self, action: #selector(runCurrentStatement))
         runStatementButton.bezelStyle = .rounded
+        // Primary action: running the statement under the caret.
+        runStatementButton.bezelColor = .controlAccentColor
         runStatementButton.toolTip = "Executar instrução (⌘↩)\nRoda só a instrução onde está o cursor; as instruções são separadas por ponto e vírgula (;).\nÚtil para manter várias consultas no editor e rodar uma de cada vez.\nSe houver texto selecionado, roda só a seleção."
-        runStatementButton.showShortcut("⌘", "↩")
+        runStatementButton.showShortcut("⌘", "↩", onAccent: true)
         sqlRunStatementButton = runStatementButton
         let clearButton = PointerButton(title: "Limpar", target: self, action: #selector(clearResults))
         clearResultsButton = clearButton
@@ -507,7 +509,7 @@ final class PgQueryApp: NSObject, NSApplicationDelegate, NSTextViewDelegate, NST
         resultNote.textColor = .secondaryLabelColor
         resultNote.font = .systemFont(ofSize: 11)
         resultNote.lineBreakMode = .byTruncatingTail
-        let controls = NSStackView(views: [runButton, runStatementButton, resultNote, copyButton, clearButton])
+        let controls = NSStackView(views: [runStatementButton, runButton, resultNote, copyButton, clearButton])
         controls.orientation = .horizontal
         controls.alignment = .centerY
         controls.spacing = 10
