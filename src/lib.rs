@@ -67,7 +67,7 @@ impl ServerCertVerifier for EncryptionOnlyVerifier {
 }
 
 enum Request { Connect(String), Query { sql: String, preview: bool } }
-enum Event { Status(String), Tables(Vec<String>), Schema(Vec<Vec<String>>), Results { preview: bool, headers: Vec<String>, types: Vec<String>, foreign_keys: Vec<Vec<String>>, rows: Vec<Vec<String>>, note: String }, Error(String), QueryError(String) }
+enum Event { Status(String), Tables(Vec<String>), Schema(Vec<Vec<String>>), TableStats(Vec<Vec<String>>), Results { preview: bool, headers: Vec<String>, types: Vec<String>, foreign_keys: Vec<Vec<String>>, rows: Vec<Vec<String>>, note: String }, Error(String), QueryError(String) }
 
 fn json_quote(value: &str) -> String {
     let mut output = String::with_capacity(value.len() + 2);
@@ -259,6 +259,19 @@ fn load_catalog(runtime: &tokio::runtime::Runtime, client: &tokio_postgres::Clie
     let (_, rows, _) = query_rows(runtime, client, TABLES)?;
     let tables = rows.into_iter().filter_map(|mut row| row.pop()).collect();
     let _ = events.send(Event::Tables(tables));
+
+    // Approximate row counts from planner statistics: instant even on huge
+    // tables. reltuples is -1 before the first VACUUM/ANALYZE (PG 14+), so
+    // fall back to the live-tuple counter.
+    const ESTIMATES: &str = "SELECT n.nspname || '.' || c.relname, \
+        (CASE WHEN c.reltuples >= 0 THEN c.reltuples::bigint ELSE coalesce(s.n_live_tup, -1) END)::text \
+        FROM pg_catalog.pg_class c \
+        JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+        LEFT JOIN pg_catalog.pg_stat_user_tables s ON s.relid = c.oid \
+        WHERE c.relkind IN ('r', 'p', 'm', 'f') AND n.nspname NOT IN ('pg_catalog', 'information_schema')";
+    if let Ok((_, rows, _)) = query_rows(runtime, client, ESTIMATES) {
+        let _ = events.send(Event::TableStats(rows));
+    }
     const COLUMNS: &str = "SELECT n.nspname, c.relname, a.attname, pg_catalog.format_type(a.atttypid, a.atttypmod), c.relkind::text \
         FROM pg_catalog.pg_attribute a \
         JOIN pg_catalog.pg_class c ON c.oid = a.attrelid \
@@ -357,6 +370,10 @@ pub extern "C" fn pg_poll() -> *mut c_char {
     let message = match event {
         Event::Status(text) => format!("{{\"kind\":\"status\",\"text\":{}}}", json_quote(&text)),
         Event::Tables(items) => format!("{{\"kind\":\"tables\",\"items\":{}}}", json_strings(&items)),
+        Event::TableStats(rows) => {
+            let items = rows.iter().map(|row| json_strings(row)).collect::<Vec<_>>().join(",");
+            format!("{{\"kind\":\"table_stats\",\"items\":[{}]}}", items)
+        }
         Event::Schema(rows) => {
             let items = rows.iter().map(|row| json_strings(row)).collect::<Vec<_>>().join(",");
             format!("{{\"kind\":\"schema\",\"items\":[{}]}}", items)
