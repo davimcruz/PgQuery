@@ -6,13 +6,16 @@ import AppKit
 /// never colored as keywords.
 @MainActor
 final class SQLHighlighter: NSObject, NSTextStorageDelegate {
-    var fontSize: CGFloat = 13
+    var fontSize: CGFloat = 13 { didSet { if fontSize != oldValue { regularFont = Self.font(fontSize, .regular); keywordFont = Self.font(fontSize, .semibold) } } }
     /// Called with the fresh tokens after each pass so the editor can reuse
     /// them for completion and bracket matching.
     var tokensDidChange: (([SQLToken]) -> Void)?
 
-    var regularFont: NSFont { .monospacedSystemFont(ofSize: fontSize, weight: .regular) }
-    var keywordFont: NSFont { .monospacedSystemFont(ofSize: fontSize, weight: .semibold) }
+    // Fonts are cached: creating an NSFont per keyword made large scripts
+    // take over a second to highlight.
+    private(set) var regularFont = SQLHighlighter.font(13, .regular)
+    private(set) var keywordFont = SQLHighlighter.font(13, .semibold)
+    private static func font(_ size: CGFloat, _ weight: NSFont.Weight) -> NSFont { .monospacedSystemFont(ofSize: size, weight: weight) }
 
     static let keywordColor = NSColor.systemBlue
     static let functionColor = NSColor.systemIndigo
@@ -33,7 +36,7 @@ final class SQLHighlighter: NSObject, NSTextStorageDelegate {
         let source = storage.string as NSString
         let tokens = SQLLexer.tokenize(source)
         let full = NSRange(location: 0, length: source.length)
-        storage.addAttributes([.font: regularFont, .foregroundColor: Self.identifierColor], range: full)
+        storage.setAttributes([.font: regularFont, .foregroundColor: Self.identifierColor], range: full)
         let significant = tokens.filter { !$0.isTrivia }
         for (position, token) in significant.enumerated() {
             switch token.kind {
