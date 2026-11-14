@@ -97,6 +97,59 @@ final class PointerSegmentedControl: NSSegmentedControl {
     override func mouseExited(with event: NSEvent) { NSCursor.arrow.set() }
 }
 
+/// Row view for the results grid that closes the last column with a grid
+/// line (row backgrounds are drawn over the table's own grid).
+final class ResultsRowView: NSTableRowView {
+    override func drawBackground(in dirtyRect: NSRect) {
+        super.drawBackground(in: dirtyRect)
+        guard let table = superview as? NSTableView, table.numberOfColumns > 0,
+              table.gridStyleMask.contains(.solidVerticalGridLineMask) else { return }
+        let x = table.rect(ofColumn: table.numberOfColumns - 1).maxX - 0.5 - frame.minX
+        table.gridColor.setFill()
+        NSRect(x: x, y: bounds.minY, width: 1, height: bounds.height).fill()
+    }
+}
+
+/// Sidebar row: table name with its approximate row count on the right.
+final class TableListCell: NSTableCellView {
+    static let identifier = NSUserInterfaceItemIdentifier("table-list-cell")
+    private let name = NSTextField(labelWithString: "")
+    private let count = NSTextField(labelWithString: "")
+
+    init() {
+        super.init(frame: .zero)
+        identifier = Self.identifier
+        name.font = .systemFont(ofSize: 12)
+        name.lineBreakMode = .byTruncatingTail
+        count.font = .monospacedDigitSystemFont(ofSize: 10.5, weight: .regular)
+        count.textColor = .tertiaryLabelColor
+        count.alignment = .right
+        name.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        count.setContentCompressionResistancePriority(.required, for: .horizontal)
+        count.setContentHuggingPriority(.required, for: .horizontal)
+        for view in [name, count] { view.translatesAutoresizingMaskIntoConstraints = false; addSubview(view) }
+        textField = name
+        NSLayoutConstraint.activate([
+            name.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 6),
+            name.centerYAnchor.constraint(equalTo: centerYAnchor),
+            count.leadingAnchor.constraint(greaterThanOrEqualTo: name.trailingAnchor, constant: 6),
+            count.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8),
+            count.centerYAnchor.constraint(equalTo: centerYAnchor),
+        ])
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    func configure(name: String, count: String) {
+        self.name.stringValue = name
+        self.count.stringValue = count
+    }
+
+    override var backgroundStyle: NSView.BackgroundStyle {
+        didSet { count.textColor = backgroundStyle == .emphasized ? .alternateSelectedControlTextColor : .tertiaryLabelColor }
+    }
+}
+
 /// A result set kept so foreign-key navigation can go back to it.
 struct ResultSnapshot {
     var headers: [String]
@@ -340,6 +393,10 @@ final class PgQueryApp: NSObject, NSApplicationDelegate, NSTextViewDelegate, NST
         resultsTableView.allowsColumnResizing = true
         resultsTableView.allowsMultipleSelection = true
         resultsTableView.gridStyleMask = [.solidVerticalGridLineMask, .solidHorizontalGridLineMask]
+        // Plain style: no inset gutter (and its stray line) before the first
+        // column, and every column, the last included, ends with a grid line.
+        if #available(macOS 11.0, *) { resultsTableView.style = .plain }
+        resultsTableView.columnAutoresizingStyle = .noColumnAutoresizing
         resultsTableView.gridColor = NSColor.separatorColor
         let rowMenu = NSMenu()
         let copyJSONItem = rowMenu.addItem(withTitle: "Copiar linha(s) selecionada(s) como JSON", action: #selector(copySelectedRowsAsJSON), keyEquivalent: "")
@@ -1102,7 +1159,20 @@ final class PgQueryApp: NSObject, NSApplicationDelegate, NSTextViewDelegate, NST
         tableView === tableListView ? filteredTables.count : filteredResultIndexes.count
     }
 
+    func tableView(_ tableView: NSTableView, rowViewForRow row: Int) -> NSTableRowView? {
+        tableView === resultsTableView ? ResultsRowView() : nil
+    }
+
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
+        if tableView === tableListView {
+            let visible = filteredTables
+            let cell = (tableView.makeView(withIdentifier: TableListCell.identifier, owner: self) as? TableListCell) ?? TableListCell()
+            guard row < visible.count else { return cell }
+            let estimate = tableEstimates[visible[row]]
+            cell.configure(name: displayName(for: visible[row]), count: estimate.map { RowEstimate.short($0) } ?? "")
+            cell.toolTip = estimate.map { visible[row] + "\n" + RowEstimate.long($0) }
+            return cell
+        }
         let identifier = NSUserInterfaceItemIdentifier(tableView === tableListView ? "table-cell" : "result-cell")
         let cell = (tableView.makeView(withIdentifier: identifier, owner: self) as? NSTableCellView) ?? NSTableCellView()
         if cell.textField == nil {
