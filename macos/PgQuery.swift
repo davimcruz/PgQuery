@@ -416,6 +416,7 @@ final class PgQueryApp: NSObject, NSApplicationDelegate, NSTextViewDelegate, NST
         resultsTableView.menu = rowMenu
         resultsTableView.translatesAutoresizingMaskIntoConstraints = false
         let resultScroll = HoverScrollView()
+        resultScrollView = resultScroll
         resultScroll.hasVerticalScroller = true
         resultScroll.hasHorizontalScroller = true
         resultScroll.borderType = .bezelBorder
@@ -1082,6 +1083,11 @@ final class PgQueryApp: NSObject, NSApplicationDelegate, NSTextViewDelegate, NST
     @objc private func copyResults() {
         let pasteboard = NSPasteboard.general
         pasteboard.clearContents()
+        if resultScrollView.documentView === planView {
+            pasteboard.setString(planView.planText, forType: .string)
+            resultNote.stringValue = "Plano copiado"
+            return
+        }
         let lines = ([resultHeaders] + resultRows).map { row in
             row.map { $0.replacingOccurrences(of: "\t", with: " ").replacingOccurrences(of: "\n", with: " ") }.joined(separator: "\t")
         }
@@ -1152,6 +1158,8 @@ final class PgQueryApp: NSObject, NSApplicationDelegate, NSTextViewDelegate, NST
     /// Visible rows after filters and sorting; cached because the grid asks
     /// for it once per cell. Invalidated by `reloadResults()`.
     private var cachedResultIndexes: [Int]?
+    private var resultScrollView: HoverScrollView!
+    private let planView = PlanView()
 
     private var filteredResultIndexes: [Int] {
         if let cachedResultIndexes { return cachedResultIndexes }
@@ -1248,6 +1256,13 @@ final class PgQueryApp: NSObject, NSApplicationDelegate, NSTextViewDelegate, NST
 
     private func reloadResults() {
         cachedResultIndexes = nil
+        // EXPLAIN output reads better as plain text than as a one-column grid.
+        if PlanView.isPlan(headers: resultHeaders, rows: resultRows) {
+            planView.show(rows: resultRows)
+            if resultScrollView.documentView !== planView { resultScrollView.documentView = planView }
+        } else if resultScrollView.documentView !== resultsTableView {
+            resultScrollView.documentView = resultsTableView
+        }
         resultsTableView.reloadData()
         filterBar.updateSummary(visible: filteredResultIndexes.count, total: resultRows.count)
     }
