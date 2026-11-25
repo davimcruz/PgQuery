@@ -5,6 +5,7 @@ use rustls::{
     DigitallySignedStruct, Error as TlsError, SignatureScheme,
 };
 use std::{
+    time::{Duration, Instant},
     collections::HashMap,
     ffi::{CStr, CString},
     os::raw::c_char,
@@ -140,102 +141,148 @@ fn backend() -> &'static Backend {
     })
 }
 
+/// Opens a connection, loads the catalog and reports progress as events.
+/// Returns whether the connection was established.
+fn connect(runtime: &tokio::runtime::Runtime, connection_string: &str, events: &Sender<Event>, client: &mut Option<tokio_postgres::Client>, foreign_keys: &mut ForeignKeys) -> bool {
+        let result = runtime.block_on(async {
+            let _ = rustls::crypto::ring::default_provider().install_default();
+            let provider = Arc::new(rustls::crypto::ring::default_provider());
+            // tokio-postgres only knows disable/prefer/require. Treat
+            // verify-ca and verify-full as `require` plus validation of
+            // the server certificate (rustls always checks the host
+            // name, so both behave like verify-full).
+            let verify = connection_string.contains("sslmode=verify-full") || connection_string.contains("sslmode=verify-ca");
+            let normalized = connection_string.replace("sslmode=verify-full", "sslmode=require").replace("sslmode=verify-ca", "sslmode=require");
+            let mut config: tokio_postgres::Config = normalized.parse()?;
+                // TCP keepalives every 30 s of idle time keep NAT/firewall
+                // entries alive while the app sits idle (the default is 2 h).
+                config.keepalives(true).keepalives_idle(Duration::from_secs(30));
+            let encryption_only = matches!(config.get_ssl_mode(), tokio_postgres::config::SslMode::Require) && !verify;
+            // Root certificates are only needed when the server
+            // certificate is validated; plain `require` skips
+            // validation and `disable` never uses TLS.
+            let validates = verify || matches!(config.get_ssl_mode(), tokio_postgres::config::SslMode::Prefer);
+            let mut roots = rustls::RootCertStore { roots: if validates { webpki_roots::TLS_SERVER_ROOTS.to_vec() } else { Vec::new() } };
+            if validates {
+                let native_roots = rustls_native_certs::load_native_certs();
+                let _ = roots.add_parsable_certificates(native_roots.certs);
+            }
+            let mut tls_config = rustls::ClientConfig::builder()
+                .with_root_certificates(roots)
+                .with_no_client_auth();
+            if encryption_only {
+                tls_config.dangerous().set_certificate_verifier(Arc::new(EncryptionOnlyVerifier { provider }));
+            }
+            let connector = tokio_postgres_rustls::MakeRustlsConnect::new(tls_config);
+            let (client, connection) = config.connect(connector).await?;
+            tokio::spawn(async move { if let Err(error) = connection.await { eprintln!("Postgres connection: {error}"); } });
+            Ok::<_, Box<dyn std::error::Error + Send + Sync>>((client, encryption_only))
+        });
+        match result {
+            Ok((connected, encryption_only)) => {
+                *client = Some(connected);
+                let status = if encryption_only {
+                    "Conectado (TLS ativo; certificado do servidor não verificado). Carregando tabelas…"
+                } else {
+                    "Conectado. Carregando tabelas…"
+                };
+                emit(events, Event::Status(status.into()));
+                match load_catalog(&runtime, client.as_ref().unwrap(), events) {
+                    Ok(keys) => {
+                        *foreign_keys = keys;
+                        let connected_status = if encryption_only {
+                            "Conectado · TLS ativo; certificado do servidor não verificado"
+                        } else {
+                            "Conectado"
+                        };
+                        emit(events, Event::Status(connected_status.into()));
+                    }
+                    Err(error) => { emit(events, Event::QueryError(error)); }
+                }
+                true
+            }
+            Err(error) => {
+                *client = None;
+                let details = error.downcast_ref::<tokio_postgres::Error>()
+                    .map(postgres_error)
+                    .unwrap_or_else(|| error_chain(error.as_ref()));
+                let lower_details = details.to_lowercase();
+                let network_hint = if connection_string.contains(".supabase.co")
+                    && ["network is unreachable", "no route to host", "connection timed out", "failed to lookup address"]
+                        .iter().any(|marker| lower_details.contains(marker)) {
+                    "\n\nDica: no Supabase, se a sua rede não tiver IPv6, use no painel Connect a URL do Session Pooler (porta 5432). O endereço direto db.<ref>.supabase.co é IPv6 na maioria dos projetos." 
+                } else { "" };
+                emit(events, Event::Error(format!("Conexão falhou: {details}{network_hint}")));
+                false
+            }
+        }
+
+}
+
+/// Whether the connection can still be used. Lets the runtime process a
+/// close that arrived while idle, and after a long idle (laptop sleep, NAT
+/// timeout) pings the server, because a dead socket gives no close at all.
+fn is_alive(runtime: &tokio::runtime::Runtime, client: &tokio_postgres::Client, last_used: Instant) -> bool {
+    // Timers must be created inside the runtime, hence the async blocks.
+    runtime.block_on(async { tokio::time::sleep(Duration::from_millis(1)).await });
+    if client.is_closed() { return false; }
+    last_used.elapsed() < Duration::from_secs(30)
+        || matches!(runtime.block_on(async { tokio::time::timeout(Duration::from_secs(3), client.simple_query("SELECT 1")).await }), Ok(Ok(_)))
+}
+
 fn worker(requests: Receiver<Request>, events: Sender<Event>) {
     let runtime = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
         Ok(runtime) => runtime,
         Err(error) => { emit(&events, Event::Error(format!("Falha ao iniciar runtime: {error}"))); return; }
     };
     let mut client: Option<tokio_postgres::Client> = None;
+    // Remembered so a dropped connection can be reopened without the user.
+    let mut last_connection: Option<String> = None;
+    let mut last_used = Instant::now();
     // (table oid, column number) → [schema, table, column] it references.
     let mut foreign_keys: ForeignKeys = HashMap::new();
     while let Ok(request) = requests.recv() {
         match request {
             Request::Connect(connection_string) => {
-                let result = runtime.block_on(async {
-                    let _ = rustls::crypto::ring::default_provider().install_default();
-                    let provider = Arc::new(rustls::crypto::ring::default_provider());
-                    // tokio-postgres only knows disable/prefer/require. Treat
-                    // verify-ca and verify-full as `require` plus validation of
-                    // the server certificate (rustls always checks the host
-                    // name, so both behave like verify-full).
-                    let verify = connection_string.contains("sslmode=verify-full") || connection_string.contains("sslmode=verify-ca");
-                    let normalized = connection_string.replace("sslmode=verify-full", "sslmode=require").replace("sslmode=verify-ca", "sslmode=require");
-                    let config: tokio_postgres::Config = normalized.parse()?;
-                    let encryption_only = matches!(config.get_ssl_mode(), tokio_postgres::config::SslMode::Require) && !verify;
-                    // Root certificates are only needed when the server
-                    // certificate is validated; plain `require` skips
-                    // validation and `disable` never uses TLS.
-                    let validates = verify || matches!(config.get_ssl_mode(), tokio_postgres::config::SslMode::Prefer);
-                    let mut roots = rustls::RootCertStore { roots: if validates { webpki_roots::TLS_SERVER_ROOTS.to_vec() } else { Vec::new() } };
-                    if validates {
-                        let native_roots = rustls_native_certs::load_native_certs();
-                        let _ = roots.add_parsable_certificates(native_roots.certs);
-                    }
-                    let mut tls_config = rustls::ClientConfig::builder()
-                        .with_root_certificates(roots)
-                        .with_no_client_auth();
-                    if encryption_only {
-                        tls_config.dangerous().set_certificate_verifier(Arc::new(EncryptionOnlyVerifier { provider }));
-                    }
-                    let connector = tokio_postgres_rustls::MakeRustlsConnect::new(tls_config);
-                    let (client, connection) = config.connect(connector).await?;
-                    tokio::spawn(async move { if let Err(error) = connection.await { eprintln!("Postgres connection: {error}"); } });
-                    Ok::<_, Box<dyn std::error::Error + Send + Sync>>((client, encryption_only))
-                });
-                match result {
-                    Ok((connected, encryption_only)) => {
-                        client = Some(connected);
-                        let status = if encryption_only {
-                            "Conectado (TLS ativo; certificado do servidor não verificado). Carregando tabelas…"
-                        } else {
-                            "Conectado. Carregando tabelas…"
-                        };
-                        emit(&events, Event::Status(status.into()));
-                        match load_catalog(&runtime, client.as_ref().unwrap(), &events) {
-                            Ok(keys) => {
-                                foreign_keys = keys;
-                                let connected_status = if encryption_only {
-                                    "Conectado · TLS ativo; certificado do servidor não verificado"
-                                } else {
-                                    "Conectado"
-                                };
-                                emit(&events, Event::Status(connected_status.into()));
-                            }
-                            Err(error) => { emit(&events, Event::QueryError(error)); }
-                        }
-                    }
-                    Err(error) => {
-                        client = None;
-                        let details = error.downcast_ref::<tokio_postgres::Error>()
-                            .map(postgres_error)
-                            .unwrap_or_else(|| error_chain(error.as_ref()));
-                        let lower_details = details.to_lowercase();
-                        let network_hint = if connection_string.contains(".supabase.co")
-                            && ["network is unreachable", "no route to host", "connection timed out", "failed to lookup address"]
-                                .iter().any(|marker| lower_details.contains(marker)) {
-                            "\n\nDica: no Supabase, se a sua rede não tiver IPv6, use no painel Connect a URL do Session Pooler (porta 5432). O endereço direto db.<ref>.supabase.co é IPv6 na maioria dos projetos." 
-                        } else { "" };
-                        emit(&events, Event::Error(format!("Conexão falhou: {details}{network_hint}")));
-                    }
-                }
+                connect(&runtime, &connection_string, &events, &mut client, &mut foreign_keys);
+                last_connection = Some(connection_string);
+                last_used = Instant::now();
             }
             Request::Query { sql, preview } => {
-                let Some(client) = client.as_ref() else { emit(&events, Event::Error("Conecte-se a um banco primeiro.".into())); continue; };
+                if client.is_none() { emit(&events, Event::Error("Conecte-se a um banco primeiro.".into())); continue; }
+                // The server may have closed an idle connection (or the Mac
+                // slept): reopen it transparently before running the query.
+                if let Some(connection_string) = &last_connection {
+                    if !is_alive(&runtime, client.as_ref().unwrap(), last_used)
+                        && !connect(&runtime, connection_string, &events, &mut client, &mut foreign_keys) { continue; }
+                }
+                let Some(open) = client.as_ref() else { continue; };
                 // The describe round trip is pipelined with the query itself.
-                let (outcome, statement) = runtime.block_on(futures_util::future::join(run_query(client, &sql), describe(client, &sql)));
+                let (outcome, statement) = runtime.block_on(futures_util::future::join(run_query(open, &sql), describe(open, &sql)));
+                last_used = Instant::now();
                 match outcome {
                     Ok((headers, rows, note)) => {
                         let (types, fks) = column_metadata(statement, headers.len(), &foreign_keys);
                         emit(&events, Event::Results { preview, headers, types, foreign_keys: fks, rows, note });
                         // Keep the sidebar and autocomplete in sync after DDL.
                         if !preview && changes_schema(&sql) {
-                            match load_catalog(&runtime, client, &events) {
+                            match load_catalog(&runtime, open, &events) {
                                 Ok(keys) => foreign_keys = keys,
                                 Err(error) => eprintln!("Catalog reload: {error}"),
                             }
                         }
                     }
-                    Err(error) => { emit(&events, Event::QueryError(error)); }
+                    Err(error) => {
+                        // The connection died while the query was running. It
+                        // may or may not have been executed, so it is not
+                        // retried: reconnect for the next one and say so.
+                        if open.is_closed() {
+                            emit(&events, Event::QueryError(format!("{error}\n\nA conexão com o banco caiu durante a consulta e foi restabelecida. Execute novamente se for seguro repetir.")));
+                            if let Some(connection_string) = &last_connection { connect(&runtime, connection_string, &events, &mut client, &mut foreign_keys); }
+                        } else {
+                            emit(&events, Event::QueryError(error));
+                        }
+                    }
                 }
             }
         }
