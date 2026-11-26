@@ -105,7 +105,7 @@ Um `;` dentro de string ou comentário não separa instruções.
 - **Ordenação:** clique no cabeçalho da coluna.
 - **Detalhes da linha:** clique numa linha para abrir o painel lateral com cada coluna, seu tipo e o valor completo.
 - **Foreign keys:** colunas com chave estrangeira mostram uma seta; ela abre a linha referenciada e o botão **Voltar** retorna ao resultado anterior.
-- **Copiar:** selecione linhas e use `⌘C` para copiar uma **tabela Markdown** pronta para colar no Linear, GitHub ou Notion (o Slack não renderiza tabelas Markdown e mostra o texto cru). **Copiar resultado** (`⇧⌘C`) copia tudo como TSV, e o menu de contexto também copia as linhas selecionadas como **JSON**.
+- **Copiar:** dê um **duplo clique numa célula** para copiar o valor dela (como veio do banco, sem formatação). Para várias linhas, selecione e use `⌘C` para copiar uma **tabela Markdown** pronta para colar no Linear, GitHub ou Notion (o Slack não renderiza tabelas Markdown e mostra o texto cru). **Copiar resultado** (`⇧⌘C`) copia tudo como TSV, e o menu de contexto também copia as linhas selecionadas como **JSON**.
 - O resultado mostra até **500 linhas** (e 2 MiB); o rodapé avisa quando há mais.
 
 ## Atalhos

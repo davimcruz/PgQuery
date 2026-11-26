@@ -420,6 +420,8 @@ final class PgQueryApp: NSObject, NSApplicationDelegate, NSTextViewDelegate, NST
         let copyMarkdownItem = rowMenu.addItem(withTitle: "Copiar linha(s) selecionada(s) como Markdown", action: #selector(copySelectedRowsAsMarkdown), keyEquivalent: "")
         copyMarkdownItem.target = self
         resultsTableView.onCopy = { [weak self] in self?.copySelectedRowsAsMarkdown() }
+        resultsTableView.target = self
+        resultsTableView.doubleAction = #selector(copyClickedCell)
         resultsTableView.menu = rowMenu
         resultsTableView.translatesAutoresizingMaskIntoConstraints = false
         let resultScroll = HoverScrollView()
@@ -1419,6 +1421,18 @@ final class PgQueryApp: NSObject, NSApplicationDelegate, NSTextViewDelegate, NST
         rootDrawerWidthConstraint?.isActive = false
         detailPanelWidthConstraint?.isActive = false
         rootFullWidthConstraint?.isActive = true
+    }
+
+    /// Double-click on a cell copies its value as the database returned it
+    /// (full text, ISO dates, `t`/`f`), which is what you paste into queries.
+    @objc private func copyClickedCell() {
+        let indexes = filteredResultIndexes
+        let row = resultsTableView.clickedRow, column = resultsTableView.clickedColumn
+        guard row >= 0, row < indexes.count, column >= 0, column < resultHeaders.count,
+              column < resultRows[indexes[row]].count else { return }  // header or empty area
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(resultRows[indexes[row]][column], forType: .string)
+        resultNote.stringValue = "Célula copiada · \(resultHeaders[column])"
     }
 
     /// Selected rows as a Markdown table, with values as shown in the grid.
