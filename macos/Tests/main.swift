@@ -185,5 +185,11 @@ do {
     check(RowEstimate.short(-1) == "?", "estimate unknown")
 }
 
+// MARK: Markdown table
+do {
+    let table = MarkdownTable.make(headers: ["id", "nota"], rows: [["1", "a|b"], ["2", "linha1\nlinha2"]])
+    check(table == "| id | nota |\n| --- | --- |\n| 1 | a\\|b |\n| 2 | linha1<br>linha2 |", "markdown table: \(table.debugDescription)")
+}
+
 print(failures == 0 ? "✓ \(passed) checks passed" : "\(failures) failed, \(passed) passed")
 exit(failures == 0 ? 0 : 1)
