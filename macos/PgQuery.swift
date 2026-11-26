@@ -39,6 +39,10 @@ class PointerTableView: NSTableView {
 
 @MainActor
 final class ResultsGridView: PointerTableView {
+    /// ⌘C: the grid has no pasteboard writer, so the app builds the text.
+    var onCopy: (() -> Void)?
+    @objc func copy(_ sender: Any?) { onCopy?() }
+
     override func rightMouseDown(with event: NSEvent) {
         let point = convert(event.locationInWindow, from: nil)
         let clickedRow = row(at: point)
@@ -413,6 +417,9 @@ final class PgQueryApp: NSObject, NSApplicationDelegate, NSTextViewDelegate, NST
         let rowMenu = NSMenu()
         let copyJSONItem = rowMenu.addItem(withTitle: "Copiar linha(s) selecionada(s) como JSON", action: #selector(copySelectedRowsAsJSON), keyEquivalent: "")
         copyJSONItem.target = self
+        let copyMarkdownItem = rowMenu.addItem(withTitle: "Copiar linha(s) selecionada(s) como Markdown", action: #selector(copySelectedRowsAsMarkdown), keyEquivalent: "")
+        copyMarkdownItem.target = self
+        resultsTableView.onCopy = { [weak self] in self?.copySelectedRowsAsMarkdown() }
         resultsTableView.menu = rowMenu
         resultsTableView.translatesAutoresizingMaskIntoConstraints = false
         let resultScroll = HoverScrollView()
@@ -1412,6 +1419,19 @@ final class PgQueryApp: NSObject, NSApplicationDelegate, NSTextViewDelegate, NST
         rootDrawerWidthConstraint?.isActive = false
         detailPanelWidthConstraint?.isActive = false
         rootFullWidthConstraint?.isActive = true
+    }
+
+    /// Selected rows as a Markdown table, with values as shown in the grid.
+    @objc private func copySelectedRowsAsMarkdown() {
+        let indexes = filteredResultIndexes
+        let selected = resultsTableView.selectedRowIndexes.compactMap { $0 < indexes.count ? indexes[$0] : nil }
+        guard !selected.isEmpty else { NSSound.beep(); return }
+        let rows = selected.map { row in
+            resultRows[row].enumerated().map { valueFormatter.display($0.element, type: $0.offset < resultTypes.count ? resultTypes[$0.offset] : nil) }
+        }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(MarkdownTable.make(headers: resultHeaders, rows: rows), forType: .string)
+        resultNote.stringValue = selected.count == 1 ? "Linha copiada como Markdown" : "\(selected.count) linhas copiadas como Markdown"
     }
 
     @objc private func copySelectedRowsAsJSON() {
