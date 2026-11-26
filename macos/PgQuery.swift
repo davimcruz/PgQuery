@@ -168,6 +168,10 @@ final class PgQueryApp: NSObject, NSApplicationDelegate, NSTextViewDelegate, NST
     private var detailPanel: NSVisualEffectView!
     private var detailScrollView: NSScrollView!
     private var sqlScrollView: NSScrollView!
+    private let toast = ToastView()
+    private let spinner = NSProgressIndicator()
+    private let emptyState = NSTextField(labelWithString: "")
+    private var runStartedAt: Date?
     private var sqlRunButton: NSButton!
     private var sqlRunStatementButton: NSButton!
     private var copyResultsButton: NSButton!
@@ -431,6 +435,15 @@ final class PgQueryApp: NSObject, NSApplicationDelegate, NSTextViewDelegate, NST
         resultScroll.borderType = .bezelBorder
         applyRoundedBorder(to: resultScroll)
         resultScroll.enableHoverScrollers()
+        emptyState.font = .systemFont(ofSize: 13)
+        emptyState.textColor = .tertiaryLabelColor
+        emptyState.alignment = .center
+        emptyState.translatesAutoresizingMaskIntoConstraints = false
+        resultScroll.addSubview(emptyState)
+        NSLayoutConstraint.activate([
+            emptyState.centerXAnchor.constraint(equalTo: resultScroll.centerXAnchor),
+            emptyState.centerYAnchor.constraint(equalTo: resultScroll.centerYAnchor, constant: 12),
+        ])
         resultScroll.documentView = resultsTableView
         resultScroll.translatesAutoresizingMaskIntoConstraints = false
         filterBar.onChange = { [weak self] in self?.reloadResults() }
@@ -517,7 +530,10 @@ final class PgQueryApp: NSObject, NSApplicationDelegate, NSTextViewDelegate, NST
         resultNote.textColor = .secondaryLabelColor
         resultNote.font = .systemFont(ofSize: 11)
         resultNote.lineBreakMode = .byTruncatingTail
-        let controls = NSStackView(views: [runStatementButton, runButton, resultNote, copyButton, clearButton])
+        spinner.style = .spinning
+        spinner.controlSize = .small
+        spinner.isDisplayedWhenStopped = false
+        let controls = NSStackView(views: [runStatementButton, runButton, spinner, resultNote, copyButton, clearButton])
         controls.orientation = .horizontal
         controls.alignment = .centerY
         controls.spacing = 10
@@ -568,6 +584,12 @@ final class PgQueryApp: NSObject, NSApplicationDelegate, NSTextViewDelegate, NST
         appShell.addArrangedSubview(root)
         appShell.addArrangedSubview(detailPanel)
         content.addSubview(appShell)
+        toast.translatesAutoresizingMaskIntoConstraints = false
+        content.addSubview(toast)
+        NSLayoutConstraint.activate([
+            toast.centerXAnchor.constraint(equalTo: content.centerXAnchor),
+            toast.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -46),
+        ])
 
         NSLayoutConstraint.activate([
             appShell.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 14),
@@ -963,10 +985,18 @@ final class PgQueryApp: NSObject, NSApplicationDelegate, NSTextViewDelegate, NST
         connectionField.stringValue.withCString { pg_connect($0) }
     }
 
+    /// "● banco · host", so it is always clear what the app is connected to.
+    private func connectionDescription() -> String {
+        guard let parts = URLComponents(string: connectionURL), let host = parts.host else { return "● Conectado" }
+        let database = String(parts.path.dropFirst())
+        return "● " + (database.isEmpty ? host : "\(database) · \(host)")
+    }
+
     private func setConnected(_ connected: Bool) {
         if connected {
             hasConnectedOnce = true
-            connectionSummaryField.isHidden = true
+            connectionSummaryField.isHidden = false
+            connectionSummaryField.stringValue = connectionDescription()
             connectionSummaryField.textColor = .systemGreen
             connectionBar.isHidden = true
             connectedBar.isHidden = false
@@ -998,6 +1028,7 @@ final class PgQueryApp: NSObject, NSApplicationDelegate, NSTextViewDelegate, NST
         resetResults()
         filterBar.removeAll()  // another table: its filters don't apply
         previewTable = visible[index]
+        setRunning(true)
         visible[index].withCString { pg_select_table($0) }
     }
 
@@ -1016,6 +1047,33 @@ final class PgQueryApp: NSObject, NSApplicationDelegate, NSTextViewDelegate, NST
         execute(range)
     }
 
+    /// Spinner while a request is in flight; also times it for the result note.
+    private func setRunning(_ on: Bool) {
+        runStartedAt = on ? Date() : nil
+        if on { spinner.startAnimation(nil) } else { spinner.stopAnimation(nil) }
+        updateEmptyState()
+    }
+
+    /// Stops the spinner and returns how long the request took ("12 ms", "1,3 s").
+    @discardableResult
+    private func finishRunning() -> String? {
+        guard let start = runStartedAt else { return nil }
+        setRunning(false)
+        let seconds = Date().timeIntervalSince(start)
+        return seconds < 1 ? "\(Int(seconds * 1000)) ms" : seconds.formatted(.number.precision(.fractionLength(1))) + " s"
+    }
+
+    private func updateEmptyState() {
+        let text: String
+        if runStartedAt != nil { text = "" }
+        else if !resultRows.isEmpty { text = filteredResultIndexes.isEmpty ? "Nenhuma linha corresponde aos filtros" : "" }
+        else if !resultHeaders.isEmpty { text = "Nenhuma linha retornada" }
+        else if hasExecutedQuery { text = "Comando executado com sucesso" }
+        else { text = "Execute uma consulta (⌘↩) ou escolha uma tabela à esquerda" }
+        emptyState.stringValue = text
+        emptyState.isHidden = text.isEmpty || resultScrollView.documentView === planView
+    }
+
     private func execute(_ range: NSRange) {
         let source = queryView.string as NSString
         guard range.length > 0, NSMaxRange(range) <= source.length else { return }
@@ -1025,6 +1083,7 @@ final class PgQueryApp: NSObject, NSApplicationDelegate, NSTextViewDelegate, NST
         resetResults()
         resultNote.stringValue = "Executando…"
         resultNote.toolTip = nil
+        setRunning(true)
         lastExecutedSQL = sql
         lastExecutedOffset = range.location
         sql.withCString { pg_query($0) }
@@ -1094,14 +1153,14 @@ final class PgQueryApp: NSObject, NSApplicationDelegate, NSTextViewDelegate, NST
         pasteboard.clearContents()
         if resultScrollView.documentView === planView {
             pasteboard.setString(planView.planText, forType: .string)
-            resultNote.stringValue = "Plano copiado"
+            toast.show("Plano copiado")
             return
         }
         let lines = ([resultHeaders] + resultRows).map { row in
             row.map { $0.replacingOccurrences(of: "\t", with: " ").replacingOccurrences(of: "\n", with: " ") }.joined(separator: "\t")
         }
         pasteboard.setString(lines.joined(separator: "\n"), forType: .string)
-        resultNote.stringValue = "Resultado copiado"
+        toast.show("Resultado copiado")
     }
 
     @objc private func slowTimer(_ timer: Timer) {
@@ -1274,6 +1333,7 @@ final class PgQueryApp: NSObject, NSApplicationDelegate, NSTextViewDelegate, NST
         }
         resultsTableView.reloadData()
         filterBar.updateSummary(visible: filteredResultIndexes.count, total: resultRows.count)
+        updateEmptyState()
     }
 
     private func flattenedCellText(_ value: String) -> String {
@@ -1392,6 +1452,7 @@ final class PgQueryApp: NSObject, NSApplicationDelegate, NSTextViewDelegate, NST
         lastExecutedSQL = ""  // errors here do not point into the editor
         resultNote.stringValue = "Abrindo \(displayName(for: target[0] + "." + target[1])) onde \(target[2]) = \(value)…"
         resultNote.toolTip = sql
+        setRunning(true)
         sql.withCString { pg_query($0) }
     }
 
@@ -1432,7 +1493,7 @@ final class PgQueryApp: NSObject, NSApplicationDelegate, NSTextViewDelegate, NST
               column < resultRows[indexes[row]].count else { return }  // header or empty area
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(resultRows[indexes[row]][column], forType: .string)
-        resultNote.stringValue = "Célula copiada · \(resultHeaders[column])"
+        toast.show("Célula copiada · \(resultHeaders[column])")
     }
 
     /// Selected rows as a Markdown table, with values as shown in the grid.
@@ -1445,7 +1506,7 @@ final class PgQueryApp: NSObject, NSApplicationDelegate, NSTextViewDelegate, NST
         }
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(MarkdownTable.make(headers: resultHeaders, rows: rows), forType: .string)
-        resultNote.stringValue = selected.count == 1 ? "Linha copiada como Markdown" : "\(selected.count) linhas copiadas como Markdown"
+        toast.show(selected.count == 1 ? "Linha copiada como Markdown" : "\(selected.count) linhas copiadas como Markdown")
     }
 
     @objc private func copySelectedRowsAsJSON() {
@@ -1459,7 +1520,7 @@ final class PgQueryApp: NSObject, NSApplicationDelegate, NSTextViewDelegate, NST
               let json = String(data: data, encoding: .utf8) else { return }
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(json, forType: .string)
-        resultNote.stringValue = selected.count == 1 ? "Linha copiada como JSON" : "\(selected.count) linhas copiadas como JSON"
+        toast.show(selected.count == 1 ? "Linha copiada como JSON" : "\(selected.count) linhas copiadas como JSON")
     }
 
     @discardableResult
@@ -1478,6 +1539,9 @@ final class PgQueryApp: NSObject, NSApplicationDelegate, NSTextViewDelegate, NST
             if text.hasPrefix("Conectado") {
                 setConnected(true)
                 saveConnectionURLToDisk(connectionURL)
+                // The last status has no "Carregando tabelas…"; it also fires
+                // after an automatic reconnect.
+                if !text.contains("Carregando") { toast.show("Conectado · " + connectionDescription().dropFirst(2)) }
             }
         case "table_stats":
             let rows = event["items"] as? [[String]] ?? []
@@ -1491,6 +1555,7 @@ final class PgQueryApp: NSObject, NSApplicationDelegate, NSTextViewDelegate, NST
             let rows = event["items"] as? [[String]] ?? []
             queryView.engine = SQLCompletionEngine(catalog: SchemaCatalog(rows: rows))
         case "results", "table_preview":
+            let elapsed = finishRunning()
             closeRowDetails()
             hasExecutedQuery = kind == "results"
             updateResultActionVisibility()
@@ -1509,7 +1574,9 @@ final class PgQueryApp: NSObject, NSApplicationDelegate, NSTextViewDelegate, NST
                     showRowDetails(at: filteredResultIndexes.first ?? 0)
                 }
             }
+            if let elapsed { resultNote.stringValue += " · " + elapsed }
         case "error":
+            finishRunning()
             hasExecutedQuery = false
             updateResultActionVisibility()
             resultHeaders = []
@@ -1520,12 +1587,14 @@ final class PgQueryApp: NSObject, NSApplicationDelegate, NSTextViewDelegate, NST
             setConnected(false)
         case "query_error" where openDetailsOnNextResult:
             // Following a foreign key failed: stay on the current results.
+            finishRunning()
             openDetailsOnNextResult = false
             navigationStack.removeLast()
             let message = event["text"] as? String ?? "Falha na consulta"
             resultNote.stringValue = "Não foi possível abrir a linha referenciada: " + (message.components(separatedBy: .newlines).first ?? message)
             resultNote.toolTip = message
         case "query_error":
+            finishRunning()
             hasExecutedQuery = false
             updateResultActionVisibility()
             resultHeaders = []
